@@ -112,7 +112,6 @@ class AlertLoader:
         "duration", "daytime",                                       # 持续时间、时段
         "custcode", "isp_code",                                      # 客户/运营商编码
     ]
-
     def __init__(self, config: ClickHouseConfig):
         self.config = config
         self._client = None
@@ -211,6 +210,76 @@ class AlertLoader:
 
         return self._build_context(df)
 
+    def load_by_target_multi(
+        self,
+        attack_target: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[AttackContext]:
+        """
+        通过攻击目标 + 时间范围加载告警记录，每条记录返回独立的 AttackContext
+
+        当 detect_attack_dist 中存在多条告警记录时（如不同时间段的攻击），
+        分别构建上下文，用于逐条独立分析。
+
+        Args:
+            attack_target: 攻击目标（IP 地址或监测对象编码）
+            start_time: 可选的开始时间过滤
+            end_time: 可选的结束时间过滤
+
+        Returns:
+            AttackContext 列表（每条告警记录一个）；若无匹配返回空列表
+        """
+        table = f"{self.config.database}.{self.config.alert_table_name}"
+        cols = ", ".join(self.ALERT_COLUMNS)
+
+        conditions = ["attack_target = %(attack_target)s"]
+        params = {"attack_target": attack_target}
+
+        if start_time:
+            conditions.append("start_time >= %(start_time)s")
+            params["start_time"] = start_time
+        if end_time:
+            conditions.append("end_time <= %(end_time)s")
+            params["end_time"] = end_time
+
+        where = " AND ".join(conditions)
+        query = f"SELECT {cols} FROM {table} WHERE {where} ORDER BY start_time DESC LIMIT 50"
+
+        logger.info(
+            "[ALERT_LOADER] 查询多条告警 / target[%s] / time[%s ~ %s]",
+            attack_target, start_time, end_time,
+        )
+        client = self._get_client()
+
+        try:
+            df = client.query_dataframe(query, params)
+        except Exception as e:
+            logger.error("[ALERT_LOADER] 查询失败 / %s", e)
+            raise
+
+        if df.empty:
+            logger.warning("[ALERT_LOADER] 未找到告警记录 / target[%s]", attack_target)
+            return []
+
+        # 按 attack_id 分组，每个 attack_id 构建一个独立的 AttackContext
+        contexts = []
+        if "attack_id" in df.columns:
+            for aid, group in df.groupby("attack_id"):
+                ctx = self._build_context(group)
+                if ctx:
+                    contexts.append(ctx)
+        else:
+            ctx = self._build_context(df)
+            if ctx:
+                contexts.append(ctx)
+
+        logger.info(
+            "[ALERT_LOADER] 查询到 %d 条独立告警 / target[%s]",
+            len(contexts), attack_target,
+        )
+        return contexts
+
     def _build_context(self, df: pd.DataFrame) -> AttackContext:
         """
         将告警 DataFrame 合并为单个 AttackContext
@@ -243,6 +312,13 @@ class AlertLoader:
         else:
             # 尝试同时使用
             target_ips = [main_target] if main_target else []
+
+        # custcode 关联监测对象表的 id
+        # 无论 target_type 是什么，只要 custcode 存在就作为 target_mo_codes
+        if "custcode" in df.columns:
+            custcodes = df["custcode"].dropna().unique().tolist()
+            if custcodes:
+                target_mo_codes = [str(c) for c in custcodes]
 
         # 时间窗口合并：取所有告警的最早开始时间和最晚结束时间
         # 这样可以覆盖攻击的完整持续时间

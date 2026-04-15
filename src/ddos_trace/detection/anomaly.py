@@ -91,6 +91,9 @@ class TrafficBaseline:
     ):
         self.threshold_config = threshold_config
         self.traceback_config = traceback_config
+        # 基线过滤结果标记，由 _filter_normal_ips 设置，供 _compute_effective_thresholds 读取
+        self._filter_excluded_any = False
+        self._filter_method_used = ""
 
     def compute(self, features: pd.DataFrame) -> Tuple[Dict, Dict]:
         """
@@ -120,9 +123,10 @@ class TrafficBaseline:
         # 步骤3: 计算有效阈值（自适应 + 告警贡献度两类）
         effective_thresholds = self._compute_effective_thresholds(baseline_stats)
         logger.info(
-            "[BASELINE] 基线计算完成 / 指标数[%d] / "
+            "[BASELINE] 基线计算完成 / 方法[%s] / 指标数[%d] / "
             "自适应PPS阈值[%.0f] / 自适应BPS阈值[%.0f] / "
             "告警PPS阈值[%.0f] / 告警BPS阈值[%.0f]",
+            self._filter_method_used,
             len(baseline_stats),
             effective_thresholds.get("packets_per_sec", 0),
             effective_thresholds.get("bytes_per_sec", 0),
@@ -135,28 +139,70 @@ class TrafficBaseline:
         """
         初步过滤疑似攻击 IP，保留"疑似正常"IP 子集
 
-        使用均值+3σ 启发式:
-        - 对 PPS 和 BPS 分别计算全量的均值和标准差
-        - 超过 PPS 或 BPS 任一维度的均值+3σ 的 IP 被视为疑似攻击，排除
-        - 使用 OR 逻辑而非 AND: 分散型 DDoS 中攻击源可能只在单一维度异常，
-          AND 逻辑会导致这些 IP 混入正常基线拉偏统计量
-        - 3σ 覆盖 99.7% 正态分布，超出即为极端异常
+        三级过滤策略（auto 模式下逐级降级）:
+        1. 均值+σ 过滤: 超过 PPS 或 BPS 均值+σ 倍数的 IP 被排除
+           - 使用 OR 逻辑（任一维度超标即排除）
+           - σ 倍数由 outlier_sigma 配置（默认 3）
+        2. 中位数+MAD 过滤: 当 σ 过滤排除 0 个 IP 时降级
+           - MAD（中位数绝对偏差）对极端值更鲁棒
+           - 1.4826 是正态分布下 MAD 到 σ 的转换系数
+        3. 百分位过滤: 当 MAD 仍排除 0 个 IP 时兜底
+           - 排除 PPS 或 BPS 排名前 N% 的 IP（默认 20%）
+           - 确保在最均匀的分布式攻击场景下也能分离出基线
+
+        percentile 模式下直接使用第 3 级策略。
+        sigma 模式下只使用第 1 级策略，不做降级。
 
         若排除后剩余 IP 不足 10 个，退化使用全量数据（保证统计量有意义）。
         """
         pps = features["packets_per_sec"].fillna(0)
         bps = features["bytes_per_sec"].fillna(0)
 
-        pps_mean, pps_std = pps.mean(), pps.std()
-        bps_mean, bps_std = bps.mean(), bps.std()
+        method = self.traceback_config.outlier_method
+        sigma = self.traceback_config.outlier_sigma
 
-        # OR 逻辑过滤: PPS 或 BPS 任一超过 3σ 即排除
-        # 比原来的 AND 逻辑更敏感，能排除更多分散型攻击源
-        pps_outlier = pps > (pps_mean + 3 * max(pps_std, 1))
-        bps_outlier = bps > (bps_mean + 3 * max(bps_std, 1))
+        # ---------- percentile 模式: 直接使用百分位排除 ----------
+        if method == "percentile":
+            pps_outlier, bps_outlier = self._percentile_filter(pps, bps)
+            self._filter_method_used = "percentile"
+        else:
+            # ---------- auto / sigma 模式: 先尝试均值+σ ----------
+            pps_mean, pps_std = pps.mean(), pps.std()
+            bps_mean, bps_std = bps.mean(), bps.std()
+
+            pps_outlier = pps > (pps_mean + sigma * max(pps_std, 1))
+            bps_outlier = bps > (bps_mean + sigma * max(bps_std, 1))
+            n_excluded = (pps_outlier | bps_outlier).sum()
+
+            if n_excluded > 0:
+                self._filter_method_used = f"sigma({sigma})"
+            else:
+                # σ 过滤排除 0 个 IP → 降级到 median+MAD
+                logger.info(
+                    "[BASELINE] sigma(%.1f)排除0个IP，降级到 median+MAD",
+                    sigma,
+                )
+                pps_outlier, bps_outlier = self._median_mad_filter(pps, bps, sigma)
+                n_excluded = (pps_outlier | bps_outlier).sum()
+
+                if n_excluded > 0:
+                    self._filter_method_used = "median_mad"
+                else:
+                    # MAD 仍然排除 0 个 → 百分位兜底
+                    logger.info(
+                        "[BASELINE] median+MAD 仍排除0个IP，降级到百分位 Top%.0f%%",
+                        self.traceback_config.outlier_top_percent,
+                    )
+                    pps_outlier, bps_outlier = self._percentile_filter(pps, bps)
+                    self._filter_method_used = "percentile_fallback"
+
+            # sigma 模式不做降级（上面 auto 走完降级链，sigma 则 n_excluded > 0 分支结束）
+            if method == "sigma" and n_excluded == 0:
+                self._filter_method_used = f"sigma({sigma})"
+
         normal_mask = ~(pps_outlier | bps_outlier)
-
         normal_df = features.loc[normal_mask]
+        self._filter_excluded_any = len(normal_df) < len(features)
 
         # 退化保护: 正常 IP 不足 10 个时使用全量数据
         if len(normal_df) < 10:
@@ -165,12 +211,62 @@ class TrafficBaseline:
                 len(normal_df),
             )
             normal_df = features
+            self._filter_excluded_any = False
 
         logger.info(
-            "[BASELINE] 正常IP过滤 / 全量[%d] / 正常[%d] / 排除[%d]",
+            "[BASELINE] 正常IP过滤 / 方法[%s] / 全量[%d] / 正常[%d] / 排除[%d]",
+            self._filter_method_used,
             len(features), len(normal_df), len(features) - len(normal_df),
         )
         return normal_df
+
+    def _median_mad_filter(
+        self, pps: pd.Series, bps: pd.Series, sigma: float
+    ) -> Tuple[pd.Series, pd.Series]:
+        """
+        中位数+MAD 过滤（对极端值更鲁棒的异常检测）
+
+        MAD（Median Absolute Deviation）相比标准差对极端值不敏感:
+        - std 会被少数极端值拉大，导致 mean+3σ 阈值过高
+        - MAD 保持稳定，能更准确地识别偏离中位数的异常值
+        - 1.4826 是正态分布假设下 MAD 到 σ 的转换系数
+        """
+        pps_median = pps.median()
+        bps_median = bps.median()
+        pps_mad = np.median(np.abs(pps - pps_median)) * 1.4826
+        bps_mad = np.median(np.abs(bps - bps_median)) * 1.4826
+
+        pps_outlier = pps > (pps_median + sigma * max(pps_mad, 1))
+        bps_outlier = bps > (bps_median + sigma * max(bps_mad, 1))
+
+        logger.info(
+            "[BASELINE] median+MAD / PPS_median[%.0f] PPS_MAD[%.0f] "
+            "BPS_median[%.0f] BPS_MAD[%.0f]",
+            pps_median, pps_mad, bps_median, bps_mad,
+        )
+        return pps_outlier, bps_outlier
+
+    def _percentile_filter(
+        self, pps: pd.Series, bps: pd.Series
+    ) -> Tuple[pd.Series, pd.Series]:
+        """
+        百分位过滤 — 排除 PPS/BPS 排名前 N% 的 IP
+
+        适用于所有 IP 流量分布非常均匀的分布式 DDoS 场景，
+        此时 σ 和 MAD 均无法分离，按排名强制排除最高流量 IP。
+        """
+        top_pct = self.traceback_config.outlier_top_percent
+        pps_cutoff = np.percentile(pps, 100 - top_pct) if len(pps) > 5 else pps.max()
+        bps_cutoff = np.percentile(bps, 100 - top_pct) if len(bps) > 5 else bps.max()
+
+        pps_outlier = pps >= pps_cutoff
+        bps_outlier = bps >= bps_cutoff
+
+        logger.info(
+            "[BASELINE] 百分位过滤 / Top%.0f%% / PPS_cutoff[%.0f] BPS_cutoff[%.0f]",
+            top_pct, pps_cutoff, bps_cutoff,
+        )
+        return pps_outlier, bps_outlier
 
     def _compute_stats(self, normal_df: pd.DataFrame) -> Dict:
         """
@@ -214,10 +310,10 @@ class TrafficBaseline:
         当告警阈值来自 fallback 默认值时，不应让 fallback 值影响自适应阈值。
         安全下界取 max(实际数据P99, P95 × 2) 而非固定比例。
 
-        告警贡献度阈值:
-        直接使用 threshold_config 中的 PPS/BPS 值:
-        - per-type 场景: threshold_config 是该攻击类型的 MySQL trigger_rate
-        - 旧场景: threshold_config 是配置文件的硬阈值
+        过滤失败时的降级:
+        当 _filter_normal_ips 无法分离攻击IP（所有IP流量相似，如均匀分布式DDoS），
+        基线被攻击流量污染，P95 × 1.5 会远高于正常水平。
+        此时用中位数 × 2 作为上限，确保自适应阈值仍能检测到偏离。
         """
         effective = {}
 
@@ -236,6 +332,27 @@ class TrafficBaseline:
             min_bps = max(bps_p99, bps_p95 * 2) if bps_p95 > 0 else 1
             effective["packets_per_sec"] = max(effective["packets_per_sec"], min_pps)
             effective["bytes_per_sec"] = max(effective["bytes_per_sec"], min_bps)
+
+            # 过滤失败降级: 当无法分离攻击IP时，用中位数 × 2 封顶
+            # 防止基线被攻击流量污染导致自适应阈值过高
+            if not self._filter_excluded_any:
+                pps_median = baseline_stats.get("packets_per_sec", {}).get("median", 0)
+                bps_median = baseline_stats.get("bytes_per_sec", {}).get("median", 0)
+                cap_pps = pps_median * 2
+                cap_bps = bps_median * 2
+
+                if cap_pps > 0 and effective["packets_per_sec"] > cap_pps:
+                    logger.info(
+                        "[BASELINE] 自适应PPS阈值封顶 / %.0f → %.0f (median×2)",
+                        effective["packets_per_sec"], cap_pps,
+                    )
+                    effective["packets_per_sec"] = cap_pps
+                if cap_bps > 0 and effective["bytes_per_sec"] > cap_bps:
+                    logger.info(
+                        "[BASELINE] 自适应BPS阈值封顶 / %.0f → %.0f (median×2)",
+                        effective["bytes_per_sec"], cap_bps,
+                    )
+                    effective["bytes_per_sec"] = cap_bps
         else:
             effective["packets_per_sec"] = float(self.threshold_config.pps_threshold)
             effective["bytes_per_sec"] = float(self.threshold_config.bps_threshold)
@@ -322,6 +439,23 @@ class AnomalyDetector:
         features["attack_confidence"] = (
             f1 * 0.25 + f2 * 0.20 + f3 * 0.15 + f4 * 0.15 + f5 * 0.10 + f6 * 0.15
         ).clip(0, 100)
+
+        # 调试日志: 各因子得分分布
+        logger.info(
+            "[DETECTION] 因子得分分布 / "
+            "f1_pps[mean=%.1f/max=%.1f/min=%.1f/p50=%.1f] / "
+            "f2_bps[mean=%.1f/max=%.1f/min=%.1f/p50=%.1f] / "
+            "f3_pkt[mean=%.1f/max=%.1f] / "
+            "f4_burst[mean=%.1f/max=%.1f] / "
+            "f5_behavior[mean=%.1f/max=%.1f] / "
+            "f6_contrib[mean=%.1f/max=%.1f]",
+            f1.mean(), f1.max(), f1.min(), f1.median(),
+            f2.mean(), f2.max(), f2.min(), f2.median(),
+            f3.mean(), f3.max(),
+            f4.mean(), f4.max(),
+            f5.mean(), f5.max(),
+            f6.mean(), f6.max(),
+        )
 
         # 分层分类: 按置信度分为 4 级
         features["traffic_class"] = pd.cut(

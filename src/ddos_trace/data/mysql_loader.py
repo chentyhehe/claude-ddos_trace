@@ -319,12 +319,30 @@ class ThresholdLoader:
     # ------------------------------------------------------------------
 
     def _query_monitor_object(self, conn, mo_code: str) -> Optional[dict]:
-        """查 system_base_monitor_object 表"""
+        """
+        查 system_base_monitor_object 表
+
+        查询策略:
+        1. 先按 code 查询（mo_code 可能是对象编码）
+        2. code 未找到时按 id 查询（custcode 关联的是 monitor_object.id）
+        """
         with conn.cursor() as cursor:
+            # 先按 code 查
             cursor.execute(
-                "SELECT code, name, threshold_enable, threshold_id, "
+                "SELECT id, code, name, threshold_enable, threshold_id, "
                 "bandwidth, bandwidth_unit "
                 "FROM system_base_monitor_object WHERE code = %s",
+                (mo_code,),
+            )
+            result = cursor.fetchone()
+            if result:
+                return result
+
+            # 再按 id 查（custcode → monitor_object.id）
+            cursor.execute(
+                "SELECT id, code, name, threshold_enable, threshold_id, "
+                "bandwidth, bandwidth_unit "
+                "FROM system_base_monitor_object WHERE id = %s",
                 (mo_code,),
             )
             return cursor.fetchone()
@@ -385,7 +403,17 @@ class ThresholdLoader:
             return cursor.fetchall()
 
     def _query_attack_types(self, conn) -> Dict[str, dict]:
-        """查 system_base_attack_type 表，返回所有攻击类型定义"""
+        """
+        查 system_base_attack_type 表，返回攻击类型定义
+
+        返回双重映射:
+        - key 为 primary_name
+        - 同时包含 second_name 到 primary_name 的映射关系
+
+        关联关系:
+        - threshold_item.protocol_type 对应 attack_type.second_name
+        - detect_attack_dist.attack_types 中的值也是 second_name
+        """
         with conn.cursor() as cursor:
             cursor.execute(
                 "SELECT primary_name, second_name, sub_classify_type, "
@@ -413,16 +441,29 @@ class ThresholdLoader:
         关键处理：
         - 单位转换：threshold_item 中的速率值可能带有独立单位
         - 子分类映射：从 attack_type 表获取 sub_classify_type 补充到 AttackTypeThreshold
+        - protocol_type 关联：threshold_item.protocol_type 对应 attack_type.second_name
+
+        关联链:
+        threshold_item.protocol_type (= second_name)
+            → attack_type 表中 second_name 匹配的行 → primary_name, sub_classify_type 等
         """
         mt = MonitorThreshold(
-            mo_code=mo_info.get("code", ""),
+            mo_code=mo_info.get("code", "") or str(mo_info.get("id", "")),
             mo_name=mo_info.get("name", ""),
             threshold_enable=(mo_info.get("threshold_enable", "ON") == "ON"),
             bandwidth=float(mo_info.get("bandwidth", 0) or 0),
             bandwidth_unit=mo_info.get("bandwidth_unit", ""),
         )
 
-        # 构建攻击类型信息映射
+        # 构建 second_name → primary_name 的反向映射
+        # threshold_item.protocol_type 和 detect_attack_dist.attack_types 都使用 second_name
+        second_to_primary = {}
+        for name, raw_info in attack_types.items():
+            sn = raw_info.get("second_name", "")
+            if sn:
+                second_to_primary[sn] = name
+
+        # 构建攻击类型信息映射（以 primary_name 为 key）
         for name, raw_info in attack_types.items():
             mt.attack_type_info[name] = AttackTypeInfo(
                 primary_name=raw_info.get("primary_name", ""),
@@ -439,7 +480,7 @@ class ThresholdLoader:
                 ip_addr_list=raw_info.get("ip_addr_list", ""),
             )
 
-        # 同时以 second_name 建立映射（告警表中的 attack_types 可能使用别名）
+        # 同时以 second_name 建立映射（告警表中的 attack_types 使用 second_name）
         for name, raw_info in attack_types.items():
             second_name = raw_info.get("second_name", "")
             if second_name and second_name not in mt.attack_type_info:
@@ -459,17 +500,20 @@ class ThresholdLoader:
                 )
 
         # 构建攻击类型阈值映射
+        # protocol_type 对应 attack_type.second_name，需通过反向映射找到 primary_name
         for item in items:
             protocol_type = item.get("protocol_type", "")
             if not protocol_type:
                 continue
 
-            # 查找子分类
+            # protocol_type 是 second_name，反查 primary_name
+            primary_name = second_to_primary.get(protocol_type, protocol_type)
+
+            # 查找子分类（通过 second_name 在原始数据中查找）
             sub_classify = ""
-            if protocol_type in attack_types:
-                sub_classify = attack_types[protocol_type].get(
-                    "sub_classify_type", ""
-                )
+            at_row = attack_types.get(primary_name)
+            if at_row:
+                sub_classify = at_row.get("sub_classify_type", "")
 
             at = AttackTypeThreshold(
                 protocol_type=protocol_type,
@@ -526,7 +570,11 @@ class ThresholdLoader:
                     ),
                 ),
             )
-            mt.attack_thresholds[protocol_type] = at
+            # 以 primary_name 为 key 存储（输出使用 primary_name）
+            mt.attack_thresholds[primary_name] = at
+            # 同时以 second_name（protocol_type）为备选 key
+            if protocol_type != primary_name:
+                mt.attack_thresholds[protocol_type] = at
 
         return mt
 

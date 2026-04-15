@@ -188,6 +188,7 @@ class AttackPathReconstructor:
                 flow_count=("src_ip_addr", "count"),
                 unique_source_ips=("src_ip_addr", "nunique"),
                 total_packets=("packets", "sum"),
+                total_bytes=("octets", "sum"),
             )
             .reset_index()
             .sort_values("hour")

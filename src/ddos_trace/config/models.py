@@ -291,6 +291,11 @@ class TracebackConfig:
     target_ips: List[str] = field(default_factory=list)      # 预设的攻击目标IP列表
     target_mo_codes: List[str] = field(default_factory=list)  # 预设的监测对象编码列表
 
+    # 异常IP排除参数 — 控制基线计算时如何分离攻击IP和正常IP
+    outlier_sigma: float = 3.0           # σ 倍数阈值，越小越激进（3=标准，2=激进）
+    outlier_method: str = "auto"         # 排除方法: auto / sigma / percentile
+    outlier_top_percent: float = 20.0    # percentile 模式下排除 Top N% 的 IP
+
     # 置信度分级阈值（百分制）:
     #   >= confirmed_threshold (80) → confirmed（确认攻击源）
     #   >= suspicious_threshold (60) → suspicious（可疑源）
@@ -440,6 +445,9 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         min_cluster_size=int(tb.get("min_cluster_size", 5)),
         use_dynamic_baseline=bool(tb.get("use_dynamic_baseline", True)),
         max_samples_for_clustering=int(tb.get("max_samples_for_clustering", 10_000)),
+        outlier_sigma=float(tb.get("outlier_sigma", 3.0)),
+        outlier_method=str(tb.get("outlier_method", "auto")),
+        outlier_top_percent=float(tb.get("outlier_top_percent", 20.0)),
     )
 
     # API 服务配置：环境变量 DDOS_API_HOST / DDOS_API_PORT 优先

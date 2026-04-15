@@ -36,6 +36,10 @@ traceback:
   min_cluster_size: 5         # 最小聚类样本数
   use_dynamic_baseline: true  # 是否使用动态阈值
   max_samples_for_clustering: 10000  # 聚类采样上限
+  # 异常IP排除参数（基线计算时分离攻击IP和正常IP）
+  outlier_sigma: 3.0          # σ 倍数（3=标准，2=激进）
+  outlier_method: "auto"      # auto=自动降级 / sigma=仅σ / percentile=百分位
+  outlier_top_percent: 20.0   # percentile模式下排除Top N%
 
 # API 服务
 api:
