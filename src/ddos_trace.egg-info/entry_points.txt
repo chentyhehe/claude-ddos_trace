@@ -1,2 +1,0 @@
-[console_scripts]
-ddos-trace = ddos_trace.__main__:main
