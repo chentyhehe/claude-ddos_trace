@@ -1,0 +1,17 @@
+/output
+/logs
+.idea/
+.vscode/
+.trae/
+tmp/
+*.log
+.cursorrules
+.claude/
+.dist/
+.pyccache/
+/src/**/__pycache__/**
+*.pyc
+src/ddos_trace.egg-info/
+findings.md
+progress.md
+task_plan.md
