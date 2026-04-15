@@ -1,0 +1,20 @@
+CREATE TABLE `system_base_attack_type` (
+  `id` int(64) NOT NULL AUTO_INCREMENT COMMENT 'ID',
+  `primary_name` varchar(100) DEFAULT NULL COMMENT '外部的规范名称。',
+  `second_name` varchar(255) DEFAULT NULL COMMENT '内部别名',
+  `description` varchar(255) DEFAULT NULL COMMENT '攻击类型描述。',
+  `create_time` timestamp NULL DEFAULT NULL COMMENT '创建时间',
+  `update_time` timestamp NULL DEFAULT NULL COMMENT '更新时间',
+  `classify_type` varchar(10) DEFAULT '0' COMMENT '攻击类型分类。DDOS：DDOS。',
+  `sub_classify_type` varchar(255) DEFAULT NULL COMMENT '攻击类型子类。Flood：洪泛攻击；反射：Amplification；Traffic：流量；其它：Other。',
+  `ip_version_name` varchar(10) DEFAULT NULL COMMENT 'IP版本。All：IPv4和IPv6；IPv4：IPv4；IPv6：IPv6',
+  `protocol_name` varchar(255) DEFAULT NULL COMMENT '协议名称。空串表示全部。',
+  `protocol_num` int(4) DEFAULT NULL COMMENT '协议号。取值范围0-255；空表示全部。',
+  `port_type` varchar(4) DEFAULT NULL COMMENT '端口类型。SRC：源端口；DST：目的端口；ALL：未指定。',
+  `port_list` varchar(255) DEFAULT '' COMMENT '端口列表字符串。以英文逗号分割多个端口。',
+  `tcp_flags` varchar(255) DEFAULT NULL COMMENT 'TCP标记字符串，以逗号分割。空串代表所有。',
+  `ip_addr_type` varchar(4) DEFAULT NULL COMMENT 'IP地址类型。SRC：源IP地址；DST：目的IP地址；ALL：未指定。',
+  `ip_addr_src_equal_dst` varchar(10) DEFAULT NULL COMMENT '源和目的地址是否相同标记。IGNORE：忽略源IP地址是否等于目的IP地址；EQUAL：源IP地址等于目的IP地址',
+  `ip_addr_list` longtext COMMENT 'IP地址列表字符串。可以是IP CIDR或单个IP地址，以英文逗号分隔。',
+  PRIMARY KEY (`id`) USING BTREE
+) ENGINE=InnoDB AUTO_INCREMENT=48 DEFAULT CHARSET=utf8 ROW_FORMAT=DYNAMIC COMMENT='DDOS攻击类型【必要表，内置攻击类型】';

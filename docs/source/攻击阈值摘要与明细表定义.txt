@@ -1,0 +1,44 @@
+CREATE TABLE `system_base_threshold_summary` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT 'ID',
+  `name` varchar(255) DEFAULT NULL COMMENT '名称',
+  `description` varchar(255) DEFAULT NULL COMMENT '描述',
+  `type` varchar(20) DEFAULT NULL COMMENT '类型：模板:TEMPLATE; 自定义： DEFINED',
+  `ipv4_enable` varchar(4) DEFAULT NULL COMMENT 'ipv4是否开启。ON：开启 OFF：关闭',
+  `ipv6_enable` varchar(4) DEFAULT NULL COMMENT 'ipv6是否开启。ON：开启 OFF：关闭',
+  `create_time` timestamp NULL DEFAULT NULL,
+  `update_time` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE
+) ENGINE=InnoDB AUTO_INCREMENT=12823 DEFAULT CHARSET=utf8 ROW_FORMAT=DYNAMIC COMMENT='阈值摘要信息';
+
+
+
+CREATE TABLE `system_base_threshold_item` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `threshold_id` bigint(20) DEFAULT NULL COMMENT '阈值ID。阈值模板引用阈值模板的ID，监测对象引用时是对象编码。',
+  `protocol_type` varchar(100) DEFAULT NULL COMMENT '攻击方式',
+  `both_over_bps_pps` varchar(4) DEFAULT NULL COMMENT '同时满足bps和pps 的条件开关:ON-开；OFF-关',
+  `ipv4_pps_enable` varchar(4) DEFAULT NULL COMMENT '阈值开关:ON-开；OFF-关',
+  `ipv4_pps_trigger_rate` double(22,4) DEFAULT NULL COMMENT '触发告警阈值',
+  `ipv4_pps_trigger_unit` varchar(4) DEFAULT NULL COMMENT '取值范围：pps,Kpps,Mpps,Gpps,Tpps',
+  `ipv4_pps_severity_rate` double(22,4) DEFAULT NULL COMMENT '严重告警阈值',
+  `ipv4_pps_severity_unit` varchar(4) DEFAULT NULL COMMENT '取值范围：pps,Kpps,Mpps,Gpps,Tpps',
+  `ipv4_bps_enable` varchar(4) DEFAULT NULL COMMENT '阈值开关: ON-开；OFF-关',
+  `ipv4_bps_trigger_rate` double(22,4) DEFAULT NULL COMMENT '触发告警阈值',
+  `ipv4_bps_trigger_unit` varchar(4) DEFAULT NULL,
+  `ipv4_bps_severity_rate` double(22,4) DEFAULT NULL COMMENT '严重告警阈值',
+  `ipv4_bps_severity_unit` varchar(4) DEFAULT NULL,
+  `ipv6_pps_enable` varchar(4) DEFAULT NULL COMMENT '阈值开关:ON-开；OFF-关',
+  `ipv6_pps_trigger_rate` double(22,4) DEFAULT NULL COMMENT '触发告警阈值',
+  `ipv6_pps_trigger_unit` varchar(4) DEFAULT NULL,
+  `ipv6_pps_severity_rate` double(22,4) DEFAULT NULL COMMENT '严重告警阈值',
+  `ipv6_pps_severity_unit` varchar(4) DEFAULT NULL,
+  `ipv6_bps_enable` varchar(4) DEFAULT NULL COMMENT '阈值开关:ON-开；OFF-关',
+  `ipv6_bps_trigger_rate` double(22,4) DEFAULT NULL COMMENT '触发告警阈值',
+  `ipv6_bps_trigger_unit` varchar(4) DEFAULT NULL COMMENT '取值范围：bps,Kbps,Mbps,Gbps,Tbps',
+  `ipv6_bps_severity_rate` double(22,4) DEFAULT NULL COMMENT '严重告警阈值',
+  `ipv6_bps_severity_unit` varchar(4) DEFAULT NULL COMMENT '取值范围：bps,Kbps,Mbps,Gbps,Tbps',
+  `create_time` timestamp NULL DEFAULT NULL COMMENT '创建时间',
+  `update_time` timestamp NULL DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `thresholdsetting_custcode` (`threshold_id`) USING BTREE
+) ENGINE=InnoDB AUTO_INCREMENT=128547 DEFAULT CHARSET=utf8 ROW_FORMAT=DYNAMIC COMMENT='阈值项参数';

@@ -1,0 +1,51 @@
+# DDoS 攻击溯源分析器配置文件
+
+# ClickHouse 数据库连接
+# 注意: clickhouse-driver 使用原生协议(默认端口9000), 非 HTTP 端口(8123)
+clickhouse:
+  host: "192.168.131.212"
+  port: 9000
+  username: "default"
+  password: "unitechs2023"
+  database: "uniflow_controller_clickhouse_develop"
+  table_name: "analytics_netflow_dist"
+  alert_table_name: "detect_attack_dist"
+  timeout: 30
+  chunk_size: 100000
+
+# MySQL 阈值配置数据库
+# 用于从业务系统加载攻击类型定义、监测对象和多攻击类型阈值配置
+# 数据表: system_base_attack_type, system_base_monitor_object,
+#         system_base_threshold_summary, system_base_threshold_item
+mysql:
+  host: "192.168.130.4"
+  port: 3306
+  username: "root"
+  password: "zyuc2016"
+  database: "uniflow_controller_mysql_cmcc"
+  charset: "utf8mb4"
+  pool_size: 5
+
+# 检测阈值
+threshold:
+  pps_threshold: 500000       # 每秒包数阈值
+  bps_threshold: 20000000     # 每秒字节数阈值（约20MB/s）
+
+# 溯源分析参数
+traceback:
+  min_cluster_size: 5         # 最小聚类样本数
+  use_dynamic_baseline: true  # 是否使用动态阈值
+  max_samples_for_clustering: 10000  # 聚类采样上限
+
+# API 服务
+api:
+  host: "0.0.0.0"
+  port: 8000
+
+# 攻击类型定义 CSV 降级数据源
+# MySQL 不可用时从此文件加载 47 种攻击类型的定义和匹配规则
+attack_type_csv_path: "docs/source/system_base_attack_type.csv"
+
+# 输出
+output:
+  dir: "./output"

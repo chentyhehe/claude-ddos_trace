@@ -1,0 +1,33 @@
+create table uniflow_controller_clickhouse_trunk.detect_attack_dist
+(
+    id         Int64 comment '主键',
+    attack_id Nullable(String) comment '攻击id',
+    custcode Nullable(String) comment '子网客户编码',
+    country Nullable(String) comment '国家',
+    province Nullable(String) comment '省份',
+    city Nullable(String) comment '城市',
+    isp Nullable(String) comment '运营商',
+    attack_target_type Nullable(String) comment 'ipv4,ipv6,customer(客户子网),router,interface,mo',
+    attack_target Nullable(String) comment '攻击目标',
+    level Nullable(String) comment '告警级别 LOW,MEDIUM,HIGH',
+    status Nullable(String) comment '当前状态，start,onging,end',
+    attack_types Nullable(String) comment 'syn,ack,udp,...，这里攻击可能存在多个。在明细数据里会详细描述出来。',
+    attack_maintype Nullable(String) comment 'syn,ack,udp,...，这里攻击只有一个,为主要的攻击类型。',
+    threshold_unit Nullable(String) comment '阈值单位',
+    threshold Nullable(Int32) comment '阈值',
+    direction Nullable(String) comment '攻击方向：攻击方向：in.入向|out.出向.入向|OUT.出向',
+    start_time DateTime comment '开始时间',
+    end_time Nullable(DateTime) comment '结束时间',
+    max_pps Nullable(Float64) comment '最大攻击包速',
+    max_bps Nullable(Float64) comment '最大攻击流速',
+    mean_packet_ps Nullable(Float64) comment '平均攻击包速',
+    mean_bytes_ps Nullable(Float64) comment '平均攻击流速',
+    duration Nullable(Int64) comment '持续时间，毫秒',
+    daytime    Int32 comment '用于检索的字段，标识了年月日',
+    isp_code Nullable(String),
+    work_id Nullable(String),
+    bytecount Nullable(Int64),
+    packcount Nullable(Int64),
+    custcode_src Nullable(String)
+)
+    engine = Distributed('mycluster', 'uniflow_controller_clickhouse_trunk', 'detect_attack', rand());
