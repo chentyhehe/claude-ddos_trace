@@ -64,6 +64,10 @@ class AttackPathReconstructor:
         ]
         anomaly_raw = raw_df[raw_df["src_ip_addr"].isin(anomaly_ips)]
 
+        if anomaly_raw.empty and not raw_df.empty:
+            logger.info("[PATH] no confirmed/suspicious sources found, fallback to all sources")
+            anomaly_raw = raw_df.copy()
+
         if anomaly_raw.empty:
             logger.warning("[PATH] 无异常源数据，跳过路径重构")
             return {
@@ -168,19 +172,52 @@ class AttackPathReconstructor:
         )
         return result
 
+    @staticmethod
+    def _choose_time_freq(time_span: pd.Timedelta) -> str:
+        """
+        根据攻击持续时间自适应选择时间聚合粒度
+
+        - 持续 < 10 分钟 → 30 秒粒度
+        - 持续 < 30 分钟 → 1 分钟粒度
+        - 持续 < 2 小时 → 5 分钟粒度
+        - 持续 < 12 小时 → 15 分钟粒度
+        - 持续 >= 12 小时 → 1 小时粒度
+        """
+        total_seconds = time_span.total_seconds()
+        if total_seconds < 600:       # < 10 min
+            return "30s"
+        if total_seconds < 1800:      # < 30 min
+            return "1min"
+        if total_seconds < 7200:      # < 2 h
+            return "5min"
+        if total_seconds < 43200:     # < 12 h
+            return "15min"
+        return "1h"
+
     def _analyze_time(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        时间分布分析: 按小时聚合攻击流量
+        时间分布分析: 自适应聚合攻击流量
 
-        使用 dt.floor('h') 将时间戳截断到小时级别，
-        展示攻击流量的时间演变趋势（如攻击何时开始、何时达到峰值、何时结束）。
+        根据攻击持续时间自动选择合适的粒度（秒/分钟/小时），
+        使时序图始终有足够的数据点来展示攻击趋势变化。
         """
         if "flow_time" not in df.columns:
             return pd.DataFrame()
 
         time_df = df.copy()
-        # 将时间戳截断到小时级别（dt.floor('h') 向下取整）
-        time_df["hour"] = time_df["flow_time"].dt.floor("h")
+
+        # 计算时间跨度并选择粒度
+        time_min = time_df["flow_time"].min()
+        time_max = time_df["flow_time"].max()
+        time_span = time_max - time_min
+        freq = self._choose_time_freq(time_span)
+
+        logger.info(
+            "[PATH] 时间分布 / span[%s] / freq[%s]",
+            str(time_span), freq,
+        )
+
+        time_df["hour"] = time_df["flow_time"].dt.floor(freq)
 
         result = (
             time_df.groupby("hour")

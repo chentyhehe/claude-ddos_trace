@@ -30,11 +30,26 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ddos_trace.analyzer import DDoSTracebackAnalyzer
 from ddos_trace.config.models import load_config
 from ddos_trace.data.alert_loader import AttackContext
+from ddos_trace.data.threat_intel_dashboard import ThreatIntelDashboardRepository
+from ddos_trace.report_browser import build_report_detail_html, build_report_index_html
+from ddos_trace.threat_intel_browser import (
+    build_intel_dashboard_html,
+    build_intel_event_detail_html,
+    build_intel_event_list_html,
+    build_intel_source_rank_html,
+    build_intel_source_profile_html,
+    build_intel_asset_blacklist_html,
+    build_intel_asset_whitelist_html,
+    build_intel_asset_tags_html,
+    build_intel_asset_feedback_html,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,14 +253,227 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         traceback_config=config.traceback,
         clickhouse_config=config.clickhouse,
         mysql_config=config.mysql,
+        threat_intel_config=config.threat_intel,
         output_dir=config.output.dir,
         csv_path=config.attack_type_csv_path,
     )
+    threat_intel_repo = ThreatIntelDashboardRepository(
+        clickhouse_config=config.clickhouse,
+        mysql_config=config.mysql,
+        threat_intel_config=config.threat_intel,
+    )
+    app.mount("/artifacts", StaticFiles(directory=config.output.dir), name="artifacts")
 
     @app.get("/health")
     async def health_check():
         """健康检查端点，用于负载均衡和服务监控"""
         return {"status": "ok", "service": "ddos-trace"}
+
+    @app.get("/reports", response_class=HTMLResponse)
+    async def reports_index():
+        return HTMLResponse(build_report_index_html(config.output.dir))
+
+    @app.get("/reports/{run_name:path}", response_class=HTMLResponse)
+    async def reports_detail(run_name: str):
+        page = build_report_detail_html(config.output.dir, run_name)
+        if page is None:
+            raise HTTPException(status_code=404, detail="report not found")
+        return HTMLResponse(page)
+
+    @app.get("/intel", response_class=HTMLResponse)
+    async def intel_dashboard():
+        return HTMLResponse(build_intel_dashboard_html())
+
+    @app.get("/intel/events", response_class=HTMLResponse)
+    async def intel_event_list_page():
+        return HTMLResponse(build_intel_event_list_html())
+
+    @app.get("/intel/events/{event_id}", response_class=HTMLResponse)
+    async def intel_event_detail(event_id: str):
+        return HTMLResponse(build_intel_event_detail_html(event_id))
+
+    @app.get("/intel/sources", response_class=HTMLResponse)
+    async def intel_source_rank_page():
+        return HTMLResponse(build_intel_source_rank_html())
+
+    @app.get("/intel/sources/{ip}", response_class=HTMLResponse)
+    async def intel_source_profile_page(ip: str):
+        return HTMLResponse(build_intel_source_profile_html(ip))
+
+    @app.get("/intel/assets/blacklist", response_class=HTMLResponse)
+    async def intel_asset_blacklist_page():
+        return HTMLResponse(build_intel_asset_blacklist_html())
+
+    @app.get("/intel/assets/whitelist", response_class=HTMLResponse)
+    async def intel_asset_whitelist_page():
+        return HTMLResponse(build_intel_asset_whitelist_html())
+
+    @app.get("/intel/assets/tags", response_class=HTMLResponse)
+    async def intel_asset_tags_page():
+        return HTMLResponse(build_intel_asset_tags_html())
+
+    @app.get("/intel/assets/feedback", response_class=HTMLResponse)
+    async def intel_asset_feedback_page():
+        return HTMLResponse(build_intel_asset_feedback_html())
+
+    @app.get("/api/v1/intel/dashboard")
+    async def intel_dashboard_api():
+        try:
+            return threat_intel_repo.get_dashboard()
+        except Exception as exc:
+            logger.error("[API] 威胁情报看板查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"威胁情报看板查询失败: {exc}")
+
+    @app.get("/api/v1/intel/events")
+    async def intel_events_api(limit: int = Query(50, ge=1, le=200)):
+        try:
+            return {"items": threat_intel_repo.list_events(limit=limit)}
+        except Exception as exc:
+            logger.error("[API] 威胁情报事件列表查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"威胁情报事件列表查询失败: {exc}")
+
+    @app.get("/api/v1/intel/events/{event_id}")
+    async def intel_event_detail_api(event_id: str):
+        try:
+            detail = threat_intel_repo.get_event_detail(event_id=event_id)
+        except Exception as exc:
+            logger.error("[API] 威胁情报事件详情查询失败 / event_id[%s] / error[%s]", event_id, exc)
+            raise HTTPException(status_code=500, detail=f"威胁情报事件详情查询失败: {exc}")
+        if detail is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        return detail
+
+    # ------------------------------------------------------------------
+    # 威胁情报 — 事件列表（带筛选分页）
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/intel/events_filtered")
+    async def intel_events_filtered_api(
+        severity: Optional[str] = Query(None),
+        attack_type: Optional[str] = Query(None),
+        target_ip: Optional[str] = Query(None),
+        target_mo: Optional[str] = Query(None),
+        time_range: str = Query("30d"),
+        start_time: Optional[str] = Query(None),
+        end_time: Optional[str] = Query(None),
+        sort_by: str = Query("time"),
+        sort_order: str = Query("desc"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        try:
+            return threat_intel_repo.list_events_filtered(
+                severity=severity,
+                attack_type=attack_type,
+                target_ip=target_ip,
+                target_mo=target_mo,
+                time_range=time_range,
+                start_time=start_time,
+                end_time=end_time,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                page=page,
+                page_size=page_size,
+            )
+        except Exception as exc:
+            logger.error("[API] 威胁情报事件筛选查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    # ------------------------------------------------------------------
+    # 威胁情报 — 攻击源排行
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/intel/top_sources")
+    async def intel_top_sources_api(
+        limit: int = Query(50, ge=1, le=200),
+        min_events: int = Query(2, ge=1),
+    ):
+        try:
+            return threat_intel_repo.get_top_repeat_sources(limit=limit, min_events=min_events)
+        except Exception as exc:
+            logger.error("[API] 攻击源排行查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    @app.get("/api/v1/intel/clusters")
+    async def intel_clusters_api(limit: int = Query(20, ge=1, le=100)):
+        try:
+            return {"items": threat_intel_repo.get_active_clusters(limit=limit)}
+        except Exception as exc:
+            logger.error("[API] 团伙聚类查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    @app.get("/api/v1/intel/geo_rank")
+    async def intel_geo_rank_api(limit: int = Query(20, ge=1, le=100)):
+        try:
+            return {"items": threat_intel_repo.get_geo_rank(limit=limit)}
+        except Exception as exc:
+            logger.error("[API] 地域排行查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    # ------------------------------------------------------------------
+    # 威胁情报 — 源 IP 画像
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/intel/source_profile/{ip}")
+    async def intel_source_profile_api(ip: str):
+        try:
+            profile = threat_intel_repo.get_source_profile(ip=ip)
+        except Exception as exc:
+            logger.error("[API] 源IP画像查询失败 / ip[%s] / error[%s]", ip, exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+        if profile is None:
+            raise HTTPException(status_code=404, detail="source IP not found")
+        return profile
+
+    # ------------------------------------------------------------------
+    # 威胁情报 — 情报资产管理
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/intel/assets/blacklist")
+    async def intel_asset_blacklist_api(
+        status: str = Query("active"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        try:
+            return threat_intel_repo.get_blacklist_assets(status=status, page=page, page_size=page_size)
+        except Exception as exc:
+            logger.error("[API] 黑名单查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    @app.get("/api/v1/intel/assets/whitelist")
+    async def intel_asset_whitelist_api(
+        status: str = Query("active"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        try:
+            return threat_intel_repo.get_whitelist_assets(status=status, page=page, page_size=page_size)
+        except Exception as exc:
+            logger.error("[API] 白名单查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    @app.get("/api/v1/intel/assets/tags")
+    async def intel_asset_tags_api(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        try:
+            return threat_intel_repo.get_tags_assets(page=page, page_size=page_size)
+        except Exception as exc:
+            logger.error("[API] 标签查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    @app.get("/api/v1/intel/assets/feedback")
+    async def intel_asset_feedback_api(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        try:
+            return threat_intel_repo.get_feedback_assets(page=page, page_size=page_size)
+        except Exception as exc:
+            logger.error("[API] 反馈查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
 
     # ------------------------------------------------------------------
     # POST /api/v1/analyze/alert  — 基于告警ID（推荐）

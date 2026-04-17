@@ -28,9 +28,11 @@ DDoS 攻击溯源分析器 - 主编排器
 """
 
 import logging
+import gc
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+import ipaddress
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -38,12 +40,15 @@ import pandas as pd
 from ddos_trace.config.models import (
     ClickHouseConfig,
     MySQLConfig,
+    ThreatIntelConfig,
     ThresholdConfig,
     TracebackConfig,
 )
 from ddos_trace.data.alert_loader import AlertLoader, AttackContext
 from ddos_trace.data.loader import ClickHouseLoader, DataPreprocessor
+from ddos_trace.data.threat_intel_lookup import ThreatIntelLookup
 from ddos_trace.data.mysql_loader import ThresholdLoader, filter_flows_by_attack_type, get_attack_type_matching_rules
+from ddos_trace.data.threat_intel_writer import ThreatIntelWriter
 from ddos_trace.config.models import MonitorThreshold
 from ddos_trace.features.extraction import FeatureExtractor
 from ddos_trace.detection.anomaly import AnomalyDetector, TrafficBaseline
@@ -105,6 +110,21 @@ def _build_output_subdir(
     safe_target = _sanitize_output_component(target_value, "unknown_target")
     return os.path.join(base_output_dir, f"{safe_attack_id}_{safe_target}")
 
+
+def _build_adaptive_output_subdir(
+    base_output_dir: str,
+    monitor_name: Optional[str],
+    target_label: Optional[str],
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+) -> str:
+    safe_monitor = _sanitize_output_component(monitor_name, "unknown_monitor")
+    safe_target = _sanitize_output_component(target_label, "unknown_target")
+    start_str = start_time.strftime("%Y%m%d_%H%M%S") if start_time else "unknown_start"
+    end_str = end_time.strftime("%Y%m%d_%H%M%S") if end_time else "unknown_end"
+    leaf = f"{safe_target}_{start_str}_{end_str}"
+    return os.path.join(base_output_dir, safe_monitor, leaf)
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
@@ -132,6 +152,7 @@ class DDoSTracebackAnalyzer:
         traceback_config: Optional[TracebackConfig] = None,
         clickhouse_config: Optional[ClickHouseConfig] = None,
         mysql_config: Optional[MySQLConfig] = None,
+        threat_intel_config: Optional[ThreatIntelConfig] = None,
         output_dir: str = ".",
         csv_path: str = "",
     ):
@@ -150,6 +171,7 @@ class DDoSTracebackAnalyzer:
         self.traceback_config = traceback_config or TracebackConfig()
         self.clickhouse_config = clickhouse_config or ClickHouseConfig()
         self.mysql_config = mysql_config or MySQLConfig()
+        self.threat_intel_config = threat_intel_config or ThreatIntelConfig()
         self.output_dir = output_dir
 
         # 初始化各流水线阶段的处理器
@@ -158,12 +180,22 @@ class DDoSTracebackAnalyzer:
         self._preprocessor = DataPreprocessor()                        # Phase 0: 数据预处理
         self._alert_loader = AlertLoader(self.clickhouse_config)       # 告警上下文加载
         self._threshold_loader = ThresholdLoader(self.mysql_config, csv_path=csv_path)
+        self._threat_intel_lookup = ThreatIntelLookup(
+            self.mysql_config,
+            self.threat_intel_config,
+        )
         self._extractor = FeatureExtractor()                           # Phase 1: 特征提取
         self._baseline = TrafficBaseline(self.threshold_config, self.traceback_config)  # Phase 1.5: 基线
         self._detector = AnomalyDetector(self.threshold_config, self.traceback_config)  # Phase 2: 异常检测
         self._clusterer = AttackFingerprintClusterer(self.traceback_config)              # Phase 3: 聚类
         self._reconstructor = AttackPathReconstructor()                # Phase 4: 路径重构
         self._reporter = ReportGenerator(self.output_dir)              # Phase 5: 报告生成
+
+        self._threat_intel_writer = ThreatIntelWriter(
+            self.clickhouse_config,
+            self.mysql_config,
+            self.threat_intel_config,
+        )
 
     def _resolve_run_output_dir(
         self,
@@ -180,6 +212,290 @@ class DDoSTracebackAnalyzer:
         )
         os.makedirs(run_output_dir, exist_ok=True)
         return run_output_dir
+
+    @staticmethod
+    def _is_ip_target(value: str) -> bool:
+        try:
+            ipaddress.ip_address((value or "").strip())
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _adjust_alert_context_window(ctx: "AttackContext") -> "AttackContext":
+        if ctx.start_time is not None:
+            ctx.start_time = ctx.start_time - timedelta(minutes=2)
+        if ctx.end_time is None:
+            ctx.end_time = datetime.now()
+        return ctx
+
+    @staticmethod
+    def _resolve_group_monitor_name(group_df: pd.DataFrame, target_mo_codes: Optional[List[str]]) -> str:
+        if "dst_mo_name" in group_df.columns:
+            values = [str(v).strip() for v in group_df["dst_mo_name"].dropna().unique() if str(v).strip()]
+            if values:
+                return values[0]
+        if "dst_mo_code" in group_df.columns:
+            values = [str(v).strip() for v in group_df["dst_mo_code"].dropna().unique() if str(v).strip()]
+            if values:
+                return values[0]
+        if target_mo_codes:
+            return str(target_mo_codes[0])
+        return "unknown_monitor"
+
+    @staticmethod
+    def _resolve_group_target_label(group_df: pd.DataFrame, attack_target: Optional[str], target_ips: Optional[List[str]]) -> str:
+        if "dst_ip_addr" in group_df.columns:
+            values = [str(v).strip() for v in group_df["dst_ip_addr"].dropna().unique() if str(v).strip()]
+            if len(values) == 1:
+                return values[0]
+            if len(values) > 1:
+                return "multi_target"
+        if target_ips:
+            return str(target_ips[0])
+        return attack_target or "unknown_target"
+
+    def _build_adaptive_group_specs(
+        self,
+        raw_df: pd.DataFrame,
+        target_ips: Optional[List[str]],
+        target_mo_codes: Optional[List[str]],
+        attack_target: Optional[str],
+    ) -> List[Dict]:
+        group_cols = [col for col in ["dst_mo_name", "dst_mo_code", "dst_ip_addr"] if col in raw_df.columns]
+        if not group_cols:
+            return [{
+                "group_df": raw_df,
+                "monitor_name": target_mo_codes[0] if target_mo_codes else "unknown_monitor",
+                "target_label": attack_target or (target_ips[0] if target_ips else "unknown_target"),
+            }]
+
+        specs = []
+        for _, group in raw_df.groupby(group_cols, dropna=False, sort=False):
+            if group.empty:
+                continue
+            specs.append({
+                "group_df": group.copy(),
+                "monitor_name": self._resolve_group_monitor_name(group, target_mo_codes),
+                "target_label": self._resolve_group_target_label(group, attack_target, target_ips),
+            })
+        return specs or [{
+            "group_df": raw_df,
+            "monitor_name": target_mo_codes[0] if target_mo_codes else "unknown_monitor",
+            "target_label": attack_target or (target_ips[0] if target_ips else "unknown_target"),
+        }]
+
+    @staticmethod
+    def _safe_first_value(df: Optional[pd.DataFrame], column: str) -> str:
+        if df is None or df.empty or column not in df.columns:
+            return ""
+        values = [str(v).strip() for v in df[column].dropna().unique() if str(v).strip()]
+        return values[0] if values else ""
+
+    def _build_event_meta(
+        self,
+        event_id: str,
+        attack_id: str = "",
+        attack_context: Optional["AttackContext"] = None,
+        raw_df: Optional[pd.DataFrame] = None,
+        output_dir: str = "",
+        attack_target: str = "",
+    ) -> Dict[str, object]:
+        raw_df = raw_df if raw_df is not None else pd.DataFrame()
+        start_time = (
+            attack_context.start_time if attack_context and attack_context.start_time else
+            (raw_df["flow_time"].min().to_pydatetime() if not raw_df.empty and "flow_time" in raw_df.columns else datetime.now())
+        )
+        end_time = (
+            attack_context.end_time if attack_context and attack_context.end_time else
+            (raw_df["flow_time"].max().to_pydatetime() if not raw_df.empty and "flow_time" in raw_df.columns else datetime.now())
+        )
+        target_ip = (
+            (attack_context.target_ips[0] if attack_context and attack_context.target_ips else "") or
+            self._safe_first_value(raw_df, "dst_ip_addr") or
+            attack_target
+        )
+        target_mo_code = (
+            (attack_context.target_mo_codes[0] if attack_context and attack_context.target_mo_codes else "") or
+            self._safe_first_value(raw_df, "dst_mo_code")
+        )
+        target_mo_name = self._safe_first_value(raw_df, "dst_mo_name") or target_mo_code
+        event_name = os.path.basename(output_dir) if output_dir else event_id
+        return {
+            "event_id": event_id,
+            "attack_id": attack_id,
+            "event_name": event_name,
+            "target_ip": target_ip,
+            "target_mo_name": target_mo_name,
+            "target_mo_code": target_mo_code,
+            "start_time": start_time,
+            "end_time": end_time,
+            "severity": "medium",
+            "event_status": "auto",
+            "created_at": datetime.now(),
+            "updated_at": datetime.now(),
+        }
+
+    def _sync_threat_intel(
+        self,
+        event_meta: Dict[str, object],
+        overview: Optional[Dict],
+        features: Optional[pd.DataFrame],
+        cluster_report: Optional[pd.DataFrame],
+        path_analysis: Optional[Dict],
+        per_type_results: Optional[Dict],
+    ) -> None:
+        if not self.threat_intel_config.enabled:
+            return
+        self._threat_intel_writer.sync_analysis_result(
+            event_meta=event_meta,
+            overview=overview,
+            features=features,
+            cluster_report=cluster_report,
+            path_analysis=path_analysis,
+            per_type_results=per_type_results,
+        )
+
+    def _enrich_features_with_threat_intel(self, features: pd.DataFrame) -> pd.DataFrame:
+        return self._threat_intel_lookup.enrich_features(features)
+
+    def _run_adaptive_overall_analysis(
+        self,
+        target_ips: Optional[List[str]] = None,
+        target_mo_codes: Optional[List[str]] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        attack_target: Optional[str] = None,
+        attack_context: Optional["AttackContext"] = None,
+    ) -> Dict:
+        """Run adaptive overall analysis without alert-type decomposition."""
+        raw_df = self._load_data(target_ips, target_mo_codes, start_time, end_time)
+        if raw_df.empty:
+            result = {"error": "查询结果为空"}
+            if attack_context is not None:
+                result["attack_context"] = attack_context
+            return result
+
+        group_specs = self._build_adaptive_group_specs(raw_df, target_ips, target_mo_codes, attack_target)
+        results = []
+        for spec in group_specs:
+            group_df = spec["group_df"]
+            features = self._extract_features(group_df)
+            if features.empty:
+                continue
+
+            features = features.copy()
+            features["traffic_class"] = "background"
+            features["attack_confidence"] = 0.0
+            features["confidence_reasons"] = "整体分析模式：未启用阈值判定，仅做聚类与画像分析"
+            features = self._enrich_features_with_threat_intel(features)
+
+            cluster_report = self._cluster_fingerprints(features)
+            path_analysis = self._reconstruct_path(group_df, features)
+            effective_thresholds = {"pps_threshold": 0, "bps_threshold": 0}
+            baseline_stats = {}
+
+            sort_cols = [c for c in ["packets_per_sec", "bytes_per_sec", "total_packets"] if c in features.columns]
+            ranked = features.sort_values(sort_cols, ascending=False) if sort_cols else features
+            overview = {
+                "total_source_ips": len(features),
+                "confirmed": 0,
+                "suspicious": 0,
+                "borderline": 0,
+                "background": len(features),
+                "anomaly_total": 0,
+                "top_attackers": [],
+                "attack_type_count": 0,
+                "attack_type_names": [],
+                "max_pps_threshold": 0,
+                "max_bps_threshold": 0,
+            }
+            for ip, row in ranked.head(10).iterrows():
+                overview["top_attackers"].append({
+                    "ip": str(ip),
+                    "attack_type": "overall",
+                    "matched_attack_types": "",
+                    "score": 0.0,
+                    "pps": round(float(row.get("packets_per_sec", 0)), 0),
+                    "bps": round(float(row.get("bytes_per_sec", 0)), 0),
+                    "country": row.get("country", ""),
+                    "province": row.get("province", ""),
+                    "isp": row.get("isp", ""),
+                })
+
+            group_start = start_time or (
+                group_df["flow_time"].min().to_pydatetime() if "flow_time" in group_df.columns else None
+            )
+            group_end = end_time or (
+                group_df["flow_time"].max().to_pydatetime() if "flow_time" in group_df.columns else None
+            )
+            run_output_dir = _build_adaptive_output_subdir(
+                self.output_dir,
+                spec["monitor_name"],
+                spec["target_label"],
+                group_start,
+                group_end,
+            )
+            os.makedirs(run_output_dir, exist_ok=True)
+            file_tag = _build_file_tag(target_ips=[spec["target_label"]])
+            report = self._generate_reports(
+                features, cluster_report, path_analysis, effective_thresholds, file_tag,
+                raw_df=group_df, per_type_results=None, overview=overview, output_dir=run_output_dir,
+            )
+            self._sync_threat_intel(
+                event_meta=self._build_event_meta(
+                    event_id=os.path.basename(run_output_dir),
+                    attack_id=str(getattr(attack_context, "attack_id", "") or ""),
+                    attack_context=attack_context,
+                    raw_df=group_df,
+                    output_dir=run_output_dir,
+                    attack_target=spec["target_label"],
+                ),
+                overview=overview,
+                features=features,
+                cluster_report=cluster_report,
+                path_analysis=path_analysis,
+                per_type_results=None,
+            )
+
+            single_result = {
+                "overview": overview,
+                "features": features[["traffic_class", "attack_confidence"]].copy(),
+                "traffic_classification": features[["traffic_class", "attack_confidence", "confidence_reasons"]],
+                "anomaly_sources": pd.DataFrame(),
+                "clusters": cluster_report,
+                "path_analysis": path_analysis,
+                "effective_thresholds": effective_thresholds,
+                "baseline_stats": baseline_stats,
+                "report": report,
+                "output_dir": run_output_dir,
+                "monitor_name": spec["monitor_name"],
+                "target_label": spec["target_label"],
+            }
+            if attack_context is not None:
+                single_result["attack_context"] = attack_context
+            results.append(single_result)
+
+            # 释放本组的大内存
+            del group_df, features
+            gc.collect()
+
+        if not results:
+            result = {"error": "查询结果为空"}
+            if attack_context is not None:
+                result["attack_context"] = attack_context
+            return result
+
+        if len(results) == 1:
+            return results[0]
+
+        main_result = results[0]
+        main_result["multi_results"] = results
+        main_result["multi_summary"] = {
+            "group_count": len(results),
+            "monitor_names": sorted({r.get("monitor_name", "") for r in results if r.get("monitor_name")}),
+        }
+        return main_result
 
     # ------------------------------------------------------------------
     # 入口1: 基于告警 ID 分析（推荐）
@@ -214,6 +530,7 @@ class DDoSTracebackAnalyzer:
         if ctx is None:
             logger.error("未找到告警记录 / attack_id[%s]", attack_id)
             return {"error": f"未找到告警记录: attack_id={attack_id}"}
+        ctx = self._adjust_alert_context_window(ctx)
 
         logger.info(
             "[ALERT] 告警上下文 / target[%s] / type[%s] / "
@@ -272,6 +589,21 @@ class DDoSTracebackAnalyzer:
             raw_df=raw_df, per_type_results=per_type_results, overview=overview,
             output_dir=run_output_dir,
         )
+        self._sync_threat_intel(
+            event_meta=self._build_event_meta(
+                event_id=attack_id,
+                attack_id=attack_id,
+                attack_context=ctx,
+                raw_df=raw_df,
+                output_dir=run_output_dir,
+                attack_target=ctx.attack_target,
+            ),
+            overview=overview,
+            features=agg_features,
+            cluster_report=agg_clusters,
+            path_analysis=agg_path,
+            per_type_results=per_type_results,
+        )
 
         # 构建结果（含向后兼容字段）
         anomaly_sources = (
@@ -279,17 +611,33 @@ class DDoSTracebackAnalyzer:
             if not agg_features.empty else pd.DataFrame()
         )
 
+        # 构建结果（含向后兼容字段）
+        anomaly_sources = (
+            agg_features[agg_features["traffic_class"].isin(["confirmed", "suspicious"])]
+            if not agg_features.empty else pd.DataFrame()
+        )
+        traffic_classification = (
+            agg_features[["traffic_class", "attack_confidence", "confidence_reasons"]]
+            if not agg_features.empty else pd.DataFrame()
+        )
+
+        # 报告生成完毕，释放大内存对象（raw_df 可能占数 GB）
+        # features 只保留分类所需的最小列集，而非完整 30+ 维特征
+        slim_features = (
+            agg_features[["traffic_class", "attack_confidence"]].copy()
+            if not agg_features.empty else pd.DataFrame()
+        )
+        del raw_df, agg_features
+        gc.collect()
+
         result = {
             "attack_context": ctx,
             # 新结构: 分项分析
             "per_type_results": per_type_results,
             "overview": overview,
             # 向后兼容: 聚合后的统一视图
-            "features": agg_features,
-            "traffic_classification": (
-                agg_features[["traffic_class", "attack_confidence", "confidence_reasons"]]
-                if not agg_features.empty else pd.DataFrame()
-            ),
+            "features": slim_features,
+            "traffic_classification": traffic_classification,
             "anomaly_sources": anomaly_sources,
             "clusters": agg_clusters,
             "path_analysis": agg_path,
@@ -336,58 +684,16 @@ class DDoSTracebackAnalyzer:
         logger.info("attack_target: %s", attack_target)
         logger.info("=" * 60)
 
-        # 查询所有匹配的告警记录（按 attack_id 分组）
-        contexts = self._alert_loader.load_by_target_multi(
-            attack_target, start_time, end_time,
+        logger.info("[TARGET] 非 attack_id 模式：直接按查询条件做总体自适应分析")
+        target_ips = [attack_target] if self._is_ip_target(attack_target) else None
+        target_mo_codes = None if target_ips else [attack_target]
+        return self._run_adaptive_overall_analysis(
+            target_ips=target_ips,
+            target_mo_codes=target_mo_codes,
+            start_time=start_time,
+            end_time=end_time,
+            attack_target=attack_target,
         )
-
-        if not contexts:
-            # 未找到告警记录：创建最小化的 AttackContext
-            logger.warning("未找到告警记录，使用配置文件默认阈值")
-            contexts = [
-                AttackContext(
-                    attack_target=attack_target,
-                    target_ips=[attack_target],
-                    start_time=start_time,
-                    end_time=end_time,
-                )
-            ]
-
-        # 多条记录时逐条分析
-        if len(contexts) == 1:
-            return self._analyze_single_context(contexts[0], attack_target, start_time, end_time)
-
-        # 多条记录：逐条分析，分别输出
-        multi_results = []
-        all_overviews = []
-        for idx, ctx in enumerate(contexts, 1):
-            logger.info(
-                "[TARGET] 分析第 %d/%d 条告警 / attack_id[%s] / target[%s]",
-                idx, len(contexts), ctx.attack_id, ctx.attack_target,
-            )
-            single_result = self._analyze_single_context(ctx, attack_target, start_time, end_time)
-            multi_results.append(single_result)
-            if "overview" in single_result:
-                all_overviews.append(single_result["overview"])
-
-        # 聚合总览
-        total_confirmed = sum(o.get("confirmed", 0) for o in all_overviews)
-        total_suspicious = sum(o.get("suspicious", 0) for o in all_overviews)
-
-        logger.info(
-            "[TARGET] 全部 %d 条告警分析完成 / 总 confirmed[%d] / 总 suspicious[%d]",
-            len(contexts), total_confirmed, total_suspicious,
-        )
-
-        # 返回第一条作为主结果，附加全部结果
-        main_result = multi_results[0]
-        main_result["multi_results"] = multi_results
-        main_result["multi_summary"] = {
-            "alert_count": len(contexts),
-            "total_confirmed": total_confirmed,
-            "total_suspicious": total_suspicious,
-        }
-        return main_result
 
     def _analyze_single_context(
         self,
@@ -445,6 +751,21 @@ class DDoSTracebackAnalyzer:
             raw_df=raw_df, per_type_results=per_type_results, overview=overview,
             output_dir=run_output_dir,
         )
+        self._sync_threat_intel(
+            event_meta=self._build_event_meta(
+                event_id=str(ctx.attack_id or os.path.basename(run_output_dir)),
+                attack_id=str(ctx.attack_id or ""),
+                attack_context=ctx,
+                raw_df=raw_df,
+                output_dir=run_output_dir,
+                attack_target=ctx.attack_target or attack_target,
+            ),
+            overview=overview,
+            features=agg_features,
+            cluster_report=agg_clusters,
+            path_analysis=agg_path,
+            per_type_results=per_type_results,
+        )
 
         anomaly_sources = (
             agg_features[agg_features["traffic_class"].isin(["confirmed", "suspicious"])]
@@ -496,40 +817,13 @@ class DDoSTracebackAnalyzer:
         logger.info("DDoS 攻击溯源分析器 - 手动模式")
         logger.info("=" * 60)
 
-        raw_df = self._load_data(target_ips, target_mo_codes, start_time, end_time)
-        if raw_df.empty:
-            return {"error": "查询结果为空"}
-
-        features = self._extract_features(raw_df)
-        effective_thresholds, baseline_stats = self._compute_baseline(features)
-        features = self._detect_anomalies(features, baseline_stats, effective_thresholds)
-
-        anomaly_sources = features[features["traffic_class"].isin(["confirmed", "suspicious"])]
-        cluster_report = self._cluster_fingerprints(anomaly_sources)
-        path_analysis = self._reconstruct_path(raw_df, features)
-        run_output_dir = self._resolve_run_output_dir(
-            attack_id=None,
+        return self._run_adaptive_overall_analysis(
             target_ips=target_ips,
-            attack_target=(target_ips[0] if target_ips else None),
+            target_mo_codes=target_mo_codes,
+            start_time=start_time,
+            end_time=end_time,
+            attack_target=(target_ips[0] if target_ips else (target_mo_codes[0] if target_mo_codes else None)),
         )
-        file_tag = _build_file_tag(target_ips=target_ips)
-        report = self._generate_reports(
-            features, cluster_report, path_analysis, effective_thresholds, file_tag,
-            raw_df=raw_df,
-            output_dir=run_output_dir,
-        )
-
-        return {
-            "features": features,
-            "traffic_classification": features[["traffic_class", "attack_confidence", "confidence_reasons"]],
-            "anomaly_sources": anomaly_sources,
-            "clusters": cluster_report,
-            "path_analysis": path_analysis,
-            "effective_thresholds": effective_thresholds,
-            "baseline_stats": baseline_stats,
-            "report": report,
-            "output_dir": run_output_dir,
-        }
 
     # ------------------------------------------------------------------
     # 按攻击类型分项分析
@@ -627,6 +921,7 @@ class DDoSTracebackAnalyzer:
 
                 eff_thresholds, baseline_stats = baseline.compute(features)
                 features = detector.detect(features, baseline_stats, eff_thresholds)
+                features = self._enrich_features_with_threat_intel(features)
 
                 anomaly_sources = features[
                     features["traffic_class"].isin(["confirmed", "suspicious"])
@@ -669,6 +964,9 @@ class DDoSTracebackAnalyzer:
                     at_name, e,
                 )
                 continue
+
+            # 释放本次迭代中间变量的内存
+            gc.collect()
 
         return per_type_results
 
@@ -1091,11 +1389,15 @@ class DDoSTracebackAnalyzer:
         """
         Phase 0: 数据加载与预处理
 
-        从 ClickHouse 查询 NetFlow 原始数据，执行时间解析和类型转换。
+        从 ClickHouse 查询 NetFlow 原始数据。
+        当时间跨度 > 10 分钟时，ClickHouseLoader 自动分块查询，
+        并在加载过程中逐块预处理后拼接，避免单次查询超时或 OOM。
         """
         logger.info("[Phase 0] 数据加载与过滤")
         raw_df = self._loader.load_data(target_ips, target_mo_codes, start_time, end_time)
-        raw_df = self._preprocessor.process(raw_df)
+        # 分块加载时已在 loader 中逐块预处理过；非分块场景需要补充预处理
+        if not raw_df.empty and "flow_time" not in raw_df.columns:
+            raw_df = self._preprocessor.process(raw_df)
         return raw_df
 
     def _extract_features(self, raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -1137,48 +1439,50 @@ class DDoSTracebackAnalyzer:
             per_type_results=per_type_results,
         )
         reporter.export_text_report(report_text, file_tag=file_tag)
+        reporter.export_summary_json(
+            overview, effective_thresholds, path_analysis or {}, per_type_results, file_tag=file_tag,
+        )
         reporter.export_traffic_classification_csv(features, file_tag=file_tag)
         reporter.export_cluster_report_csv(cluster_report, file_tag=file_tag)
-
-        # 总体雷达图
-        reporter.plot_cluster_radar_chart(cluster_report, file_tag=file_tag)
-        reporter.plot_top_attacker_radar_chart(features, file_tag=file_tag)
-
-        # 分攻击类型雷达图（每个有聚类结果的攻击类型单独出图）
-        if per_type_results:
-            for at_name, type_data in per_type_results.items():
-                type_clusters = type_data.get("clusters")
-                if type_clusters is not None and not type_clusters.empty:
-                    safe_name = at_name.replace(" ", "_").replace("/", "_")
-                    reporter.plot_cluster_radar_chart(
-                        type_clusters, file_tag=f"_{safe_name}{file_tag}",
-                    )
-
-        # 威胁情报输出: 攻击源黑名单 + 攻击时间线
-        reporter.export_attack_blacklist_csv(features, cluster_report, file_tag=file_tag)
         reporter.export_attack_timeline_csv(
             path_analysis, raw_df=raw_df, features=features, file_tag=file_tag,
         )
         reporter.export_path_analysis_csvs(path_analysis or {}, file_tag=file_tag)
-        reporter.export_summary_json(
-            overview, effective_thresholds, path_analysis or {}, per_type_results, file_tag=file_tag,
+
+        # 总体雷达图
+        reporter.plot_overall_profile_radar_chart(features, file_tag=file_tag)
+
+        # 分攻击类型雷达图（每个有聚类结果的攻击类型单独出图）
+        reporter.plot_suspect_source_radar_charts(features, file_tag=file_tag)
+        reporter.plot_source_risk_dashboard(features, file_tag=file_tag)
+        reporter.plot_attack_source_operator_dashboard(
+            features,
+            path_analysis or {},
+            overview or {},
+            file_tag=file_tag,
         )
-        reporter.export_attack_situation_report(
-            overview or {}, path_analysis or {}, features, file_tag=file_tag,
-        )
+
+        # 威胁情报输出: 攻击源黑名单 + 攻击时间线
         reporter.plot_attack_timeline_chart(path_analysis or {}, file_tag=file_tag)
-        reporter.plot_source_distribution_dashboard(path_analysis or {}, file_tag=file_tag)
 
         # 分项报告导出
         if per_type_results:
             reporter.export_per_type_csv(per_type_results, file_tag=file_tag)
+            if overview:
+                reporter.plot_attack_overview(
+                    per_type_results, overview, path_analysis or {}, file_tag=file_tag,
+                )
+            for at_name, type_data in per_type_results.items():
+                type_features = type_data.get("features")
+                if type_features is None or type_features.empty:
+                    continue
+                safe_name = at_name.replace(" ", "_").replace("/", "_")
+                reporter.plot_attack_type_profile_radar_chart(
+                    type_features,
+                    attack_type=at_name,
+                    file_tag=f"_{safe_name}{file_tag}",
+                )
             # 可疑攻击源 CSV（按攻击类型分行，附带可疑原因）
-            reporter.export_suspicious_sources_csv(per_type_results, file_tag=file_tag)
 
         # 攻击总览仪表盘（2x2 子图）
-        if per_type_results and overview:
-            reporter.plot_attack_overview(
-                per_type_results, overview, path_analysis or {}, file_tag=file_tag,
-            )
-
         return report_text

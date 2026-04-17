@@ -116,6 +116,9 @@ class AttackFingerprintClusterer:
 
         # 生成聚类报告
         report = self._build_report(features, available_cols)
+        if report.empty or "cluster_id" not in report.columns:
+            logger.info("[CLUSTER] no valid clusters generated")
+            return None
         logger.info(
             "[CLUSTER] 聚类完成 / 集群数[%d]",
             report["cluster_id"].nunique(),

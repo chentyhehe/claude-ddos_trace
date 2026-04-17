@@ -33,9 +33,9 @@ threshold:
 
 # 溯源分析参数
 traceback:
-  min_cluster_size: 5         # 最小聚类样本数
+  min_cluster_size: 2         # 最小聚类样本数
   use_dynamic_baseline: true  # 是否使用动态阈值
-  max_samples_for_clustering: 10000  # 聚类采样上限
+  max_samples_for_clustering: 100  # 聚类采样上限
   # 异常IP排除参数（基线计算时分离攻击IP和正常IP）
   outlier_sigma: 3.0          # σ 倍数（3=标准，2=激进）
   outlier_method: "auto"      # auto=自动降级 / sigma=仅σ / percentile=百分位
@@ -53,3 +53,20 @@ attack_type_csv_path: "docs/source/system_base_attack_type.csv"
 # 输出
 output:
   dir: "./output"
+
+# 威胁情报业务表回流
+threat_intel:
+  enabled: true
+  clickhouse_host: "192.168.131.212"
+  clickhouse_port: 9000
+  clickhouse_username: "default"
+  clickhouse_password: "unitechs2023"
+  clickhouse_database: "threaten_intelligence"
+  clickhouse_timeout: 30
+  mysql_host: "192.168.130.4"
+  mysql_port: 3306
+  mysql_username: "root"
+  mysql_password: "zyuc2016"
+  mysql_database: "threaten_intelligence"
+  mysql_charset: "utf8mb4"
+  batch_size: 5000

@@ -812,3 +812,35 @@ CLI 帮助信息和报告中的中文在 Windows CMD 中可能乱码。解决方
 **Q: __pycache__ 目录散落各处**
 
 设置环境变量 `PYTHONPYCACHEPREFIX` 指向一个统一目录，Python 会把所有 `.pyc` 编译缓存集中存放，不再在源码目录生成 `__pycache__/`。
+
+---
+
+## 六、页面访问补充
+
+启动服务后，除了原有 API 与 Swagger 文档，现在还可以直接访问分析结果页面：
+
+- 结果列表页：`http://localhost:8000/reports`
+- 单次结果详情页：`http://localhost:8000/reports/{结果目录名}`
+- 输出文件直链：`http://localhost:8000/artifacts/{结果目录名}/{文件名}`
+
+示例：
+
+```text
+http://localhost:8000/reports
+http://localhost:8000/reports/2026041417444901270003_121.239.129.106
+http://localhost:8000/artifacts/2026041417444901270003_121.239.129.106/attack_overview_2026041417444901270003.png
+```
+
+页面说明：
+
+- `/reports` 会读取 `output.dir` 指定目录下的分析结果文件夹。
+- 页面会从文件夹名称推断展示攻击 ID 与目标 IP。
+- 详情页会展示总览指标、Markdown 报告预览、图表图片，以及 CSV/JSON/PNG 等输出文件链接。
+
+如果服务部署在 Linux + Nginx 场景下，外部访问地址对应替换为你的域名，例如：
+
+```text
+http://ddos-trace.example.com/reports
+http://ddos-trace.example.com/docs
+http://ddos-trace.example.com/health
+```

@@ -353,6 +353,26 @@ class OutputConfig:
 
 
 @dataclass
+class ThreatIntelConfig:
+    """威胁情报业务表回流配置。"""
+
+    enabled: bool = True
+    clickhouse_host: str = ""
+    clickhouse_port: int = 0
+    clickhouse_username: str = ""
+    clickhouse_password: str = ""
+    clickhouse_database: str = "threat_intel"
+    clickhouse_timeout: int = 30
+    mysql_host: str = ""
+    mysql_port: int = 0
+    mysql_username: str = ""
+    mysql_password: str = ""
+    mysql_database: str = "threat_intel"
+    mysql_charset: str = "utf8mb4"
+    batch_size: int = 5000
+
+
+@dataclass
 class AppConfig:
     """
     应用总配置 - 聚合所有子配置
@@ -366,6 +386,7 @@ class AppConfig:
     traceback: TracebackConfig = field(default_factory=TracebackConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    threat_intel: ThreatIntelConfig = field(default_factory=ThreatIntelConfig)
     attack_type_csv_path: str = ""  # MySQL 不可用时从此 CSV 加载攻击类型定义
 
 
@@ -463,6 +484,24 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         dir=ou.get("dir", "./output"),
     )
 
+    ti = raw.get("threat_intel", {})
+    threat_intel_config = ThreatIntelConfig(
+        enabled=bool(ti.get("enabled", True)),
+        clickhouse_host=os.getenv("DDOS_TI_CH_HOST", ti.get("clickhouse_host", "")),
+        clickhouse_port=int(os.getenv("DDOS_TI_CH_PORT", ti.get("clickhouse_port", 0) or 0)),
+        clickhouse_username=os.getenv("DDOS_TI_CH_USER", ti.get("clickhouse_username", "")),
+        clickhouse_password=os.getenv("DDOS_TI_CH_PASSWORD", ti.get("clickhouse_password", "")),
+        clickhouse_database=os.getenv("DDOS_TI_CH_DATABASE", ti.get("clickhouse_database", "threat_intel")),
+        clickhouse_timeout=int(os.getenv("DDOS_TI_CH_TIMEOUT", ti.get("clickhouse_timeout", 30))),
+        mysql_host=os.getenv("DDOS_TI_MYSQL_HOST", ti.get("mysql_host", "")),
+        mysql_port=int(os.getenv("DDOS_TI_MYSQL_PORT", ti.get("mysql_port", 0) or 0)),
+        mysql_username=os.getenv("DDOS_TI_MYSQL_USER", ti.get("mysql_username", "")),
+        mysql_password=os.getenv("DDOS_TI_MYSQL_PASSWORD", ti.get("mysql_password", "")),
+        mysql_database=os.getenv("DDOS_TI_MYSQL_DATABASE", ti.get("mysql_database", "threat_intel")),
+        mysql_charset=os.getenv("DDOS_TI_MYSQL_CHARSET", ti.get("mysql_charset", "utf8mb4")),
+        batch_size=int(os.getenv("DDOS_TI_BATCH_SIZE", ti.get("batch_size", 5000))),
+    )
+
     return AppConfig(
         clickhouse=clickhouse_config,
         mysql=mysql_config,
@@ -470,5 +509,6 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         traceback=traceback_config,
         api=api_config,
         output=output_config,
+        threat_intel=threat_intel_config,
         attack_type_csv_path=raw.get("attack_type_csv_path", ""),
     )

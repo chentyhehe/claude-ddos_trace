@@ -115,6 +115,7 @@ def _run_alert(args):
         traceback_config=config.traceback,
         clickhouse_config=config.clickhouse,
         mysql_config=config.mysql,
+        threat_intel_config=config.threat_intel,
         output_dir=output_dir,
         csv_path=config.attack_type_csv_path,
     )
@@ -151,6 +152,7 @@ def _run_target(args):
         traceback_config=config.traceback,
         clickhouse_config=config.clickhouse,
         mysql_config=config.mysql,
+        threat_intel_config=config.threat_intel,
         output_dir=output_dir,
         csv_path=config.attack_type_csv_path,
     )
@@ -187,6 +189,7 @@ def _run_analyze(args):
         traceback_config=config.traceback,
         clickhouse_config=config.clickhouse,
         mysql_config=config.mysql,
+        threat_intel_config=config.threat_intel,
         output_dir=output_dir,
         csv_path=config.attack_type_csv_path,
     )

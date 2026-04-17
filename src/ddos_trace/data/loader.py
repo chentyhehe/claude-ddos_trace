@@ -4,13 +4,19 @@ ClickHouse 数据加载与预处理模块
 本模块负责从 ClickHouse 的 NetFlow 分布式表中查询原始流量数据，
 并进行时间解析、类型转换等预处理操作。
 
+大数据量保护:
+    当查询时间跨度 > 10 分钟时，自动将查询拆分为多个 10 分钟的时间窗口分批加载，
+    避免 ClickHouse 单次查询超时或返回数据量过大导致 OOM。
+    加载后的分块数据逐个预处理后拼接为完整 DataFrame 供下游分析。
+
 核心类:
     - ClickHouseLoader: 从 ClickHouse 加载 NetFlow 数据，支持按目标IP/监测对象/时间范围过滤
     - DataPreprocessor: 原始数据预处理，包括时间戳转换、数值类型修正
 """
 
+import gc
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
@@ -65,7 +71,14 @@ class ClickHouseLoader:
 
     使用 clickhouse-driver 的 query_dataframe 方法直接返回 DataFrame，
     避免手动转换。采用懒加载模式初始化客户端连接，首次查询时才建立连接。
+
+    大数据保护:
+    当查询时间跨度 > CHUNK_MINUTES (默认 10 分钟) 时，自动按时间窗口分块查询，
+    每块独立加载 + 预处理后拼接，避免单次查询超时或 OOM。
     """
+
+    # 分块时间窗口 (分钟): 跨度超过此值时自动拆分查询
+    CHUNK_MINUTES = 10
 
     def __init__(self, config: ClickHouseConfig):
         self.config = config
@@ -109,7 +122,10 @@ class ClickHouseLoader:
         end_time: Optional[datetime] = None,
     ) -> pd.DataFrame:
         """
-        从 ClickHouse 查询 NetFlow 数据
+        从 ClickHouse 查询 NetFlow 数据 (自动分块)
+
+        当时间跨度 > CHUNK_MINUTES 时，自动拆分为多个时间窗口分批查询，
+        避免单次查询数据量过大导致超时或 OOM。
 
         Args:
             target_ips: 目的IP列表，为空则不过滤
@@ -120,11 +136,65 @@ class ClickHouseLoader:
         Returns:
             包含原始 NetFlow 数据的 DataFrame
         """
+        # 判断是否需要分块
+        chunks = self._split_time_chunks(start_time, end_time)
+
+        if len(chunks) <= 1:
+            # 单块: 直接查询
+            return self._load_single(target_ips, target_mo_codes, start_time, end_time)
+
+        # 多块: 分批加载 + 逐块预处理 + 拼接
+        return self._load_chunked(target_ips, target_mo_codes, chunks)
+
+    def _split_time_chunks(
+        self,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+    ) -> List[tuple]:
+        """
+        将时间范围拆分为 CHUNK_MINUTES 大小的时间窗口列表
+
+        Returns:
+            [(chunk_start, chunk_end), ...] 列表
+            如果不需要分块 (时间范围缺失或 <= CHUNK_MINUTES)，返回单个元素列表
+        """
+        if start_time is None or end_time is None:
+            return [(start_time, end_time)]
+
+        total_seconds = (end_time - start_time).total_seconds()
+        chunk_seconds = self.CHUNK_MINUTES * 60
+
+        if total_seconds <= chunk_seconds:
+            return [(start_time, end_time)]
+
+        chunks = []
+        cursor = start_time
+        while cursor < end_time:
+            chunk_end = min(cursor + timedelta(seconds=chunk_seconds), end_time)
+            chunks.append((cursor, chunk_end))
+            cursor = chunk_end
+
+        logger.info(
+            "[DATA_LOADER] 时间范围 [%.0f分钟] → 拆分为 %d 个 %d分钟块",
+            total_seconds / 60, len(chunks), self.CHUNK_MINUTES,
+        )
+        return chunks
+
+    def _load_single(
+        self,
+        target_ips: Optional[List[str]],
+        target_mo_codes: Optional[List[str]],
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+    ) -> pd.DataFrame:
+        """单次查询，不分块"""
         query, params = self._build_query(target_ips, target_mo_codes, start_time, end_time)
-        logger.info("[DATA_LOADER] 构建查询 [%s] / 查询参数[%s] / 执行查询-预计返回字段[%d]", query, params, len(QUERY_COLUMNS))
+        logger.info(
+            "[DATA_LOADER] 构建查询 / 查询参数[%s] / 预计返回字段[%d]",
+            params, len(QUERY_COLUMNS),
+        )
 
         client = self._get_client()
-
         try:
             result = client.query_dataframe(query, params)
         except Exception as e:
@@ -135,10 +205,62 @@ class ClickHouseLoader:
             logger.warning("[DATA_LOADER] 查询结果为空")
             return result
 
+        logger.info("[DATA_LOADER] 查询完成 / 记录数[%d]", len(result))
+        return result
+
+    def _load_chunked(
+        self,
+        target_ips: Optional[List[str]],
+        target_mo_codes: Optional[List[str]],
+        chunks: List[tuple],
+    ) -> pd.DataFrame:
+        """
+        分块加载: 对每个时间窗口独立查询，逐块预处理后拼接
+
+        内存管理策略:
+        1. 每块查询后立即预处理，释放原始块内存
+        2. 预处理后的块保留在列表中（已去除无用列、转换类型，体积更小）
+        3. 全部块加载完毕后一次性 concat
+        4. concat 后立即释放块列表 + gc
+        """
+        preprocessor = DataPreprocessor()
+        processed_chunks: List[pd.DataFrame] = []
+        total_rows = 0
+
+        for i, (chunk_start, chunk_end) in enumerate(chunks):
+            logger.info(
+                "[DATA_LOADER] 分块 [%d/%d] / 时间[%s ~ %s]",
+                i + 1, len(chunks),
+                chunk_start.strftime("%Y-%m-%d %H:%M:%S") if chunk_start else "?",
+                chunk_end.strftime("%Y-%m-%d %H:%M:%S") if chunk_end else "?",
+            )
+
+            raw_chunk = self._load_single(
+                target_ips, target_mo_codes, chunk_start, chunk_end,
+            )
+            if raw_chunk.empty:
+                continue
+
+            # 逐块预处理
+            processed = preprocessor.process(raw_chunk)
+            processed_chunks.append(processed)
+            total_rows += len(processed)
+
+            # 释放原始块内存
+            del raw_chunk
+
+        if not processed_chunks:
+            logger.warning("[DATA_LOADER] 所有分块查询结果为空")
+            return pd.DataFrame()
+
+        # 拼接所有块
+        result = pd.concat(processed_chunks, ignore_index=True)
+        del processed_chunks
+        gc.collect()
+
         logger.info(
-            "[DATA_LOADER] 查询完成 / 记录数[%d] / 列数[%d]",
-            len(result),
-            len(result.columns),
+            "[DATA_LOADER] 分块加载完成 / 总块数[%d] / 总记录数[%d]",
+            len(chunks), len(result),
         )
         return result
 

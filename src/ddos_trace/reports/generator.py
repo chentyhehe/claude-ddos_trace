@@ -44,6 +44,32 @@ class ReportGenerator:
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
+    RISK_COLORS = {
+        "confirmed": "#d73027",
+        "suspicious": "#fc8d59",
+        "borderline": "#fee08b",
+        "background": "#91a7b3",
+    }
+
+    ARTIFACT_NAMES = {
+        "summary_json": "00_分析摘要_summary",
+        "overview_report": "01_总览报告_overview_report",
+        "source_profiles_csv": "02_源IP画像_source_profiles",
+        "source_clusters_csv": "03_源聚类分析_source_clusters",
+        "entry_router_csv": "04_入口节点_entry_hotspots",
+        "geo_distribution_csv": "05_来源地域_source_geo",
+        "mo_distribution_csv": "06_来源对象_source_monitor_objects",
+        "time_distribution_csv": "07_时间分布_time_distribution",
+        "attack_overview_png": "10_攻击总览_attack_overview",
+        "source_risk_dashboard_png": "11_源风险看板_source_risk_dashboard",
+        "operator_dashboard_png": "12_运营视角看板_operator_dashboard",
+        "overall_profile_radar_png": "13_总体画像雷达_overall_profile_radar",
+        "suspect_source_radar_png": "14_疑似源雷达_suspect_source_radar",
+        "timeline_chart_png": "15_时间趋势_attack_timeline",
+        "per_type_details_csv": "16_分攻击类型明细_per_type_details",
+        "attack_type_profile_radar_png": "17_分类型画像_type_profile_radar",
+    }
+
     @staticmethod
     def _prepare_matplotlib():
         """统一 Matplotlib 配置，优先解决中文乱码和负号显示问题。"""
@@ -88,6 +114,79 @@ class ReportGenerator:
             "dst_port_count": "目的端口数",
             "protocol_count": "协议数",
         }
+
+    @staticmethod
+    def _radar_metric_specs() -> List[Dict[str, str]]:
+        return [
+            {"column": "packets_per_sec", "label": "包速率(PPS)"},
+            {"column": "bytes_per_sec", "label": "字节速率(BPS)"},
+            {"column": "bytes_per_packet", "label": "平均包长"},
+            {"column": "burst_ratio", "label": "突发强度"},
+            {"column": "burst_count", "label": "突发次数"},
+            {"column": "flow_interval_cv", "label": "节奏离散度"},
+            {"column": "dst_port_count", "label": "目的端口丰富度"},
+            {"column": "protocol_count", "label": "协议丰富度"},
+        ]
+
+    @staticmethod
+    def _select_radar_columns(df: pd.DataFrame) -> List[Dict[str, str]]:
+        return [spec for spec in ReportGenerator._radar_metric_specs() if spec["column"] in df.columns]
+
+    @staticmethod
+    def _normalize_radar_frame(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+        radar_df = df[columns].fillna(0).astype(float).copy()
+        radar_df = np.log1p(np.clip(radar_df, a_min=0, a_max=None))
+        col_min = radar_df.min(axis=0)
+        col_max = radar_df.max(axis=0)
+        col_range = col_max - col_min
+        col_range[col_range == 0] = 1.0
+        normalized = (radar_df - col_min) / col_range
+        return normalized.clip(lower=0, upper=1)
+
+    @staticmethod
+    def _prepare_radar_axes(labels: List[str]):
+        angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
+        angles += angles[:1]
+        return angles
+
+    @staticmethod
+    def _safe_numeric(series: pd.Series) -> pd.Series:
+        return pd.to_numeric(series, errors="coerce").fillna(0)
+
+    @staticmethod
+    def _format_large_number(value: float) -> str:
+        value = float(value)
+        if value >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f}G"
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.2f}M"
+        if value >= 1_000:
+            return f"{value / 1_000:.2f}K"
+        return f"{value:.0f}"
+
+    @staticmethod
+    def _summarize_source_label(row: pd.Series, fallback: str = "未知") -> str:
+        parts = [
+            str(row.get("country") or row.get("src_country") or "").strip(),
+            str(row.get("province") or row.get("src_province") or "").strip(),
+            str(row.get("isp") or row.get("src_isp") or "").strip(),
+        ]
+        label = "-".join([p for p in parts if p])
+        return label or fallback
+
+    @staticmethod
+    def _build_geo_label(row: pd.Series) -> str:
+        parts = [
+            str(row.get("src_country") or "").strip(),
+            str(row.get("src_province") or "").strip(),
+            str(row.get("src_city") or "").strip(),
+            str(row.get("src_isp") or "").strip(),
+        ]
+        return "-".join([p for p in parts if p]) or "未知地域"
+
+    @staticmethod
+    def _risk_order() -> List[str]:
+        return ["confirmed", "suspicious", "borderline", "background"]
 
     @staticmethod
     def _table_to_records(table) -> List[dict]:
@@ -139,6 +238,10 @@ class ReportGenerator:
         if pd.isna(obj):
             return None
         return str(obj)
+
+    def _artifact_filename(self, artifact_key: str, ext: str, file_tag: str = "") -> str:
+        base_name = self.ARTIFACT_NAMES.get(artifact_key, artifact_key)
+        return f"{base_name}{file_tag}.{ext}"
 
     def generate_text_report(
         self,
@@ -452,7 +555,7 @@ class ReportGenerator:
             features: 带有分类标签的特征 DataFrame
             file_tag: 文件名标签，用于区分不同分析任务（如 _ATK-001 或 _1.2.3.4_20260414）
         """
-        filename = f"traffic_classification_report{file_tag}.csv"
+        filename = self._artifact_filename("source_profiles_csv", "csv", file_tag)
         filepath = f"{self.output_dir}/{filename}"
         export_cols = [
             "attack_confidence", "traffic_class", "confidence_reasons",
@@ -484,7 +587,7 @@ class ReportGenerator:
         """
         if cluster_report is None or cluster_report.empty:
             return None
-        filename = f"cluster_fingerprint_report{file_tag}.csv"
+        filename = self._artifact_filename("source_clusters_csv", "csv", file_tag)
         filepath = f"{self.output_dir}/{filename}"
         cluster_report.to_csv(filepath, index=False, encoding="utf-8-sig")
         logger.info("[REPORT] CSV导出: %s", filepath)
@@ -634,13 +737,195 @@ class ReportGenerator:
         logger.info("[REPORT] 核心攻击源雷达图保存: %s", filepath)
         return filepath
 
+    def plot_overall_profile_radar_chart(
+        self,
+        features: pd.DataFrame,
+        file_tag: str = "",
+    ) -> Optional[str]:
+        """输出总体视角的风险分层画像雷达图。"""
+        if features is None or features.empty or "traffic_class" not in features.columns:
+            return None
+
+        specs = self._select_radar_columns(features)
+        if len(specs) < 4:
+            return None
+
+        plot_df = features.copy()
+        present_classes = [c for c in self._risk_order() if c in set(plot_df["traffic_class"].dropna())]
+        if len(present_classes) < 2:
+            return None
+
+        radar_cols = [spec["column"] for spec in specs]
+        normalized = self._normalize_radar_frame(plot_df, radar_cols)
+        labels = [spec["label"] for spec in specs]
+        angles = self._prepare_radar_axes(labels)
+
+        try:
+            plt = self._prepare_matplotlib()
+        except ImportError:
+            logger.warning("[REPORT] matplotlib 未安装，跳过总体画像雷达图")
+            return None
+
+        fig, ax = plt.subplots(figsize=(9, 8), subplot_kw=dict(polar=True))
+        for cls in present_classes:
+            cls_idx = plot_df[plot_df["traffic_class"] == cls].index
+            if len(cls_idx) == 0:
+                continue
+            values = normalized.loc[cls_idx].median().tolist()
+            values += values[:1]
+            label = f"{cls} | {len(cls_idx)} IP"
+            color = self.RISK_COLORS.get(cls, "#4c78a8")
+            ax.plot(angles, values, linewidth=2.2, color=color, label=label)
+            ax.fill(angles, values, alpha=0.12, color=color)
+
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+        ax.set_yticklabels(["25%", "50%", "75%", "100%"], fontsize=8)
+        ax.set_title("总体攻击源风险画像雷达图", fontsize=14, pad=22)
+        ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.05), fontsize=8)
+
+        filename = self._artifact_filename("overall_profile_radar_png", "png", file_tag)
+        filepath = f"{self.output_dir}/{filename}"
+        fig.savefig(filepath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("[REPORT] 总体画像雷达图保存: %s", filepath)
+        return filepath
+
+    def plot_attack_type_profile_radar_chart(
+        self,
+        features: pd.DataFrame,
+        attack_type: str,
+        file_tag: str = "",
+    ) -> Optional[str]:
+        """输出单个攻击类型下，不同风险等级的画像雷达图。"""
+        if features is None or features.empty or "traffic_class" not in features.columns:
+            return None
+
+        specs = self._select_radar_columns(features)
+        if len(specs) < 4:
+            return None
+
+        anomaly_df = features[features["traffic_class"].isin(["confirmed", "suspicious", "borderline"])].copy()
+        if anomaly_df.empty:
+            anomaly_df = features.copy()
+
+        present_classes = [c for c in self._risk_order() if c in set(anomaly_df["traffic_class"].dropna())]
+        if not present_classes:
+            return None
+
+        radar_cols = [spec["column"] for spec in specs]
+        normalized = self._normalize_radar_frame(anomaly_df, radar_cols)
+        labels = [spec["label"] for spec in specs]
+        angles = self._prepare_radar_axes(labels)
+
+        try:
+            plt = self._prepare_matplotlib()
+        except ImportError:
+            logger.warning("[REPORT] matplotlib 未安装，跳过攻击类型画像雷达图")
+            return None
+
+        fig, ax = plt.subplots(figsize=(9, 8), subplot_kw=dict(polar=True))
+        for cls in present_classes:
+            cls_idx = anomaly_df[anomaly_df["traffic_class"] == cls].index
+            values = normalized.loc[cls_idx].median().tolist()
+            values += values[:1]
+            color = self.RISK_COLORS.get(cls, "#4c78a8")
+            ax.plot(angles, values, linewidth=2.2, color=color, label=f"{cls} | {len(cls_idx)} IP")
+            ax.fill(angles, values, alpha=0.12, color=color)
+
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+        ax.set_yticklabels(["25%", "50%", "75%", "100%"], fontsize=8)
+        ax.set_title(f"分攻击类型画像雷达图: {attack_type}", fontsize=14, pad=22)
+        ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.05), fontsize=8)
+
+        filename = self._artifact_filename("attack_type_profile_radar_png", "png", file_tag)
+        filepath = f"{self.output_dir}/{filename}"
+        fig.savefig(filepath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("[REPORT] 分攻击类型画像雷达图保存: %s", filepath)
+        return filepath
+
+    def plot_suspect_source_radar_charts(
+        self,
+        features: pd.DataFrame,
+        file_tag: str = "",
+        top_n: int = 6,
+    ) -> Optional[str]:
+        """输出疑似攻击源的多雷达图小面板。"""
+        if features is None or features.empty or "attack_confidence" not in features.columns:
+            return None
+
+        specs = self._select_radar_columns(features)
+        if len(specs) < 4:
+            return None
+
+        suspect_df = features[features["traffic_class"].isin(["confirmed", "suspicious"])].copy()
+        if suspect_df.empty:
+            suspect_df = features.sort_values("attack_confidence", ascending=False).head(top_n).copy()
+        else:
+            suspect_df = suspect_df.sort_values("attack_confidence", ascending=False).head(top_n).copy()
+
+        if suspect_df.empty:
+            return None
+
+        radar_cols = [spec["column"] for spec in specs]
+        normalized = self._normalize_radar_frame(suspect_df, radar_cols)
+        labels = [spec["label"] for spec in specs]
+        angles = self._prepare_radar_axes(labels)
+
+        try:
+            plt = self._prepare_matplotlib()
+        except ImportError:
+            logger.warning("[REPORT] matplotlib 未安装，跳过疑似攻击源雷达图")
+            return None
+
+        panel_count = len(suspect_df)
+        cols = 2 if panel_count > 1 else 1
+        rows = int(np.ceil(panel_count / cols))
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 7, rows * 6), subplot_kw=dict(polar=True))
+        axes = np.atleast_1d(axes).reshape(rows, cols)
+        fig.suptitle("疑似攻击源多雷达图", fontsize=15, fontweight="bold")
+
+        flat_axes = axes.flatten()
+        for ax, (src_ip, row) in zip(flat_axes, normalized.iterrows()):
+            values = row.tolist()
+            values += values[:1]
+            raw = suspect_df.loc[src_ip]
+            risk_cls = str(raw.get("traffic_class", "background"))
+            score = float(raw.get("attack_confidence", 0))
+            color = self.RISK_COLORS.get(risk_cls, "#4c78a8")
+            ax.plot(angles, values, linewidth=2.0, color=color)
+            ax.fill(angles, values, alpha=0.16, color=color)
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels(labels, fontsize=8)
+            ax.set_ylim(0, 1)
+            ax.set_yticks([0.5, 1.0])
+            ax.set_yticklabels(["50%", "100%"], fontsize=7)
+            ax.set_title(f"{src_ip}\n{risk_cls} | score={score:.1f}", fontsize=10, pad=16)
+
+        for ax in flat_axes[panel_count:]:
+            ax.remove()
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        filename = self._artifact_filename("suspect_source_radar_png", "png", file_tag)
+        filepath = f"{self.output_dir}/{filename}"
+        fig.savefig(filepath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("[REPORT] 疑似攻击源雷达图保存: %s", filepath)
+        return filepath
+
     def export_text_report(
         self,
         report_text: str,
         file_tag: str = "",
     ) -> str:
         """将文字报告落盘，便于归档与分享。"""
-        filename = f"analysis_report{file_tag}.md"
+        filename = self._artifact_filename("overview_report", "md", file_tag)
         filepath = f"{self.output_dir}/{filename}"
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(report_text)
@@ -657,10 +942,10 @@ class ReportGenerator:
             return []
 
         export_plan = [
-            ("entry_routers", f"entry_router_report{file_tag}.csv"),
-            ("geo_distribution", f"geo_distribution_report{file_tag}.csv"),
-            ("mo_distribution", f"mo_distribution_report{file_tag}.csv"),
-            ("time_distribution", f"time_distribution_report{file_tag}.csv"),
+            ("entry_routers", self._artifact_filename("entry_router_csv", "csv", file_tag)),
+            ("geo_distribution", self._artifact_filename("geo_distribution_csv", "csv", file_tag)),
+            ("mo_distribution", self._artifact_filename("mo_distribution_csv", "csv", file_tag)),
+            ("time_distribution", self._artifact_filename("time_distribution_csv", "csv", file_tag)),
         ]
         exported_files: List[str] = []
 
@@ -712,7 +997,7 @@ class ReportGenerator:
                     "top_attackers": summary.get("top_attackers", [])[:5],
                 }
 
-        filename = f"analysis_summary{file_tag}.json"
+        filename = self._artifact_filename("summary_json", "json", file_tag)
         filepath = f"{self.output_dir}/{filename}"
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2, default=self._json_default)
@@ -910,10 +1195,266 @@ class ReportGenerator:
             ax4.set_title("Top-10 攻击来源地域")
 
         plt.tight_layout(rect=[0, 0, 1, 0.95])
-        filepath = f"{self.output_dir}/attack_overview{file_tag}.png"
+        filename = self._artifact_filename("attack_overview_png", "png", file_tag)
+        filepath = f"{self.output_dir}/{filename}"
         fig.savefig(filepath, dpi=150, bbox_inches="tight")
         plt.close(fig)
         logger.info("[REPORT] 攻击总览仪表盘保存: %s", filepath)
+        return filepath
+
+    def plot_source_risk_dashboard(
+        self,
+        features: pd.DataFrame,
+        file_tag: str = "",
+    ) -> Optional[str]:
+        """从攻击源规模、风险、集中度角度输出运营视角图表。"""
+        if features is None or features.empty:
+            return None
+
+        required = {"traffic_class", "attack_confidence", "packets_per_sec", "bytes_per_sec"}
+        if not required.issubset(set(features.columns)):
+            return None
+
+        try:
+            plt = self._prepare_matplotlib()
+        except ImportError:
+            logger.warning("[REPORT] matplotlib 未安装，跳过攻击源风险看板")
+            return None
+
+        plot_df = features.copy()
+        risk_order = [c for c in self._risk_order() if c in set(plot_df["traffic_class"].dropna())]
+        fig, axes = plt.subplots(2, 2, figsize=(16, 11))
+        fig.suptitle("攻击源风险与规模看板", fontsize=16, fontweight="bold")
+
+        class_counts = plot_df["traffic_class"].value_counts().reindex(risk_order).fillna(0)
+        ax = axes[0, 0]
+        colors = [self.RISK_COLORS.get(cls, "#4c78a8") for cls in class_counts.index]
+        wedges, _, autotexts = ax.pie(
+            class_counts.values,
+            labels=class_counts.index,
+            autopct=lambda pct: f"{pct:.1f}%\n({int(round(pct * class_counts.sum() / 100))})" if pct > 0 else "",
+            colors=colors,
+            startangle=90,
+            textprops={"fontsize": 9},
+        )
+        for text in autotexts:
+            text.set_fontsize(8)
+        ax.set_title("风险等级构成")
+        ax.legend(
+            wedges,
+            [f"{cls}: {int(class_counts.loc[cls])} IP" for cls in class_counts.index],
+            loc="lower left",
+            fontsize=8,
+        )
+
+        ax = axes[0, 1]
+        scatter_df = plot_df.copy()
+        scatter_df["pps_plot"] = np.log10(self._safe_numeric(scatter_df["packets_per_sec"]) + 1)
+        scatter_df["bps_plot"] = np.log10(self._safe_numeric(scatter_df["bytes_per_sec"]) + 1)
+        scatter_df["score_plot"] = self._safe_numeric(scatter_df["attack_confidence"])
+        for cls in risk_order:
+            subset = scatter_df[scatter_df["traffic_class"] == cls]
+            if subset.empty:
+                continue
+            ax.scatter(
+                subset["pps_plot"],
+                subset["bps_plot"],
+                s=np.clip(subset["score_plot"] * 2.5, 20, 220),
+                c=self.RISK_COLORS.get(cls, "#4c78a8"),
+                alpha=0.65,
+                label=f"{cls} ({len(subset)})",
+                edgecolors="white",
+                linewidths=0.4,
+            )
+        ax.set_xlabel("log10(PPS + 1)")
+        ax.set_ylabel("log10(BPS + 1)")
+        ax.set_title("攻击源流量强度散点图")
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(alpha=0.25, linestyle="--")
+
+        ax = axes[1, 0]
+        top_df = plot_df.sort_values(["attack_confidence", "packets_per_sec"], ascending=False).head(10).copy()
+        if not top_df.empty:
+            labels = [str(idx) for idx in top_df.index]
+            values = self._safe_numeric(top_df["attack_confidence"])
+            y_pos = np.arange(len(top_df))
+            bar_colors = [self.RISK_COLORS.get(cls, "#4c78a8") for cls in top_df["traffic_class"]]
+            bars = ax.barh(y_pos, values, color=bar_colors, height=0.65)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.invert_yaxis()
+            ax.set_xlabel("攻击置信度")
+            ax.set_title("高风险攻击源 Top-10")
+            for bar, (_, row) in zip(bars, top_df.iterrows()):
+                ax.text(
+                    bar.get_width() + 1,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{row['traffic_class']} | PPS={self._format_large_number(row.get('packets_per_sec', 0))}",
+                    va="center",
+                    fontsize=7,
+                )
+        else:
+            ax.text(0.5, 0.5, "无数据", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title("高风险攻击源 Top-10")
+
+        ax = axes[1, 1]
+        concentration_df = plot_df.sort_values("packets_per_sec", ascending=False).head(15).copy()
+        if not concentration_df.empty:
+            total_pps = max(self._safe_numeric(plot_df["packets_per_sec"]).sum(), 1)
+            concentration_df["pps_share"] = self._safe_numeric(concentration_df["packets_per_sec"]) / total_pps
+            labels = [str(idx) for idx in concentration_df.index]
+            values = concentration_df["pps_share"] * 100
+            ax.bar(np.arange(len(values)), values, color="#3a7ca5")
+            ax.set_xticks(np.arange(len(values)))
+            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+            ax.set_ylabel("PPS占比(%)")
+            ax.set_title("流量集中度 Top-15")
+            ax.grid(axis="y", alpha=0.25, linestyle="--")
+        else:
+            ax.text(0.5, 0.5, "无数据", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title("流量集中度 Top-15")
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        filename = self._artifact_filename("source_risk_dashboard_png", "png", file_tag)
+        filepath = f"{self.output_dir}/{filename}"
+        fig.savefig(filepath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("[REPORT] 攻击源风险看板保存: %s", filepath)
+        return filepath
+
+    def plot_attack_source_operator_dashboard(
+        self,
+        features: pd.DataFrame,
+        path_analysis: Dict,
+        overview: Dict,
+        file_tag: str = "",
+    ) -> Optional[str]:
+        """输出运营商更关心的路径与来源热点看板。"""
+        if features is None or features.empty:
+            return None
+
+        try:
+            plt = self._prepare_matplotlib()
+        except ImportError:
+            logger.warning("[REPORT] matplotlib 未安装，跳过运营视角看板")
+            return None
+
+        fig, axes = plt.subplots(2, 2, figsize=(17, 11))
+        fig.suptitle("攻击来源与路径热点看板", fontsize=16, fontweight="bold")
+
+        geo_df = path_analysis.get("geo_distribution") if path_analysis else None
+        mo_df = path_analysis.get("mo_distribution") if path_analysis else None
+        router_df = path_analysis.get("entry_routers") if path_analysis else None
+        top_attackers = overview.get("top_attackers", []) if overview else []
+
+        ax = axes[0, 0]
+        if isinstance(geo_df, pd.DataFrame) and not geo_df.empty:
+            top_geo = geo_df.sort_values("unique_source_ips", ascending=False).head(10).copy()
+            labels = top_geo.apply(self._build_geo_label, axis=1)
+            values = self._safe_numeric(top_geo["unique_source_ips"])
+            ax.barh(np.arange(len(top_geo)), values, color="#4c78a8")
+            ax.set_yticks(np.arange(len(top_geo)))
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.invert_yaxis()
+            ax.set_xlabel("攻击源IP数量")
+            ax.set_title("地域/运营商热点 Top-10")
+        else:
+            ax.text(0.5, 0.5, "无地域来源数据", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title("地域/运营商热点 Top-10")
+
+        ax = axes[0, 1]
+        if isinstance(router_df, pd.DataFrame) and not router_df.empty:
+            top_router = router_df.sort_values("unique_source_ips", ascending=False).head(8).copy()
+            labels = top_router.apply(lambda r: f"{r.get('flow_ip_addr', '?')}#{r.get('input_if_index', '?')}", axis=1)
+            values = self._safe_numeric(top_router["unique_source_ips"])
+            bars = ax.barh(np.arange(len(top_router)), values, color="#f58518")
+            ax.set_yticks(np.arange(len(top_router)))
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.invert_yaxis()
+            ax.set_xlabel("异常源数量")
+            ax.set_title("入口节点压力 Top-8")
+            for bar, (_, row) in zip(bars, top_router.iterrows()):
+                ax.text(
+                    bar.get_width() + 0.2,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"包量={self._format_large_number(row.get('total_packets', 0))}",
+                    va="center",
+                    fontsize=7,
+                )
+        else:
+            ax.text(0.5, 0.5, "无入口节点数据", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title("入口节点压力 Top-8")
+
+        ax = axes[1, 0]
+        if isinstance(mo_df, pd.DataFrame) and not mo_df.empty:
+            top_mo = mo_df.sort_values("attacking_source_ips", ascending=False).head(8).copy()
+            labels = top_mo["src_mo_name"].fillna(top_mo["src_mo_code"]).fillna("未知")
+            values = self._safe_numeric(top_mo["attacking_source_ips"])
+            ax.barh(np.arange(len(top_mo)), values, color="#54a24b")
+            ax.set_yticks(np.arange(len(top_mo)))
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.invert_yaxis()
+            ax.set_xlabel("攻击源IP数量")
+            ax.set_title("来源监测对象 Top-8")
+        else:
+            source_summary = (
+                features.groupby(["province", "isp"], dropna=False)
+                .size()
+                .reset_index(name="source_ips")
+                .sort_values("source_ips", ascending=False)
+                .head(8)
+            )
+            if not source_summary.empty:
+                labels = source_summary.apply(lambda r: self._summarize_source_label(r), axis=1)
+                values = self._safe_numeric(source_summary["source_ips"])
+                ax.barh(np.arange(len(source_summary)), values, color="#54a24b")
+                ax.set_yticks(np.arange(len(source_summary)))
+                ax.set_yticklabels(labels, fontsize=8)
+                ax.invert_yaxis()
+                ax.set_xlabel("攻击源IP数量")
+            else:
+                ax.text(0.5, 0.5, "无来源对象数据", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title("来源对象/运营商热点")
+
+        ax = axes[1, 1]
+        if top_attackers:
+            top_df = pd.DataFrame(top_attackers[:10])
+            labels = top_df["ip"].astype(str)
+            x = np.arange(len(top_df))
+            width = 0.38
+            pps = pd.to_numeric(top_df.get("pps"), errors="coerce").fillna(0)
+            bps = pd.to_numeric(top_df.get("bps"), errors="coerce").fillna(0) / 1_000_000
+            ax.bar(x - width / 2, pps, width, label="PPS", color="#e45756")
+            ax.bar(x + width / 2, bps, width, label="BPS(MB/s)", color="#72b7b2")
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+            ax.set_title("高风险攻击源带宽/包速率对比")
+            ax.legend(fontsize=8)
+            ax.grid(axis="y", alpha=0.25, linestyle="--")
+        else:
+            suspect_df = features.sort_values(["attack_confidence", "packets_per_sec"], ascending=False).head(10)
+            if not suspect_df.empty:
+                labels = [str(idx) for idx in suspect_df.index]
+                x = np.arange(len(suspect_df))
+                width = 0.38
+                pps = self._safe_numeric(suspect_df["packets_per_sec"])
+                bps = self._safe_numeric(suspect_df["bytes_per_sec"]) / 1_000_000
+                ax.bar(x - width / 2, pps, width, label="PPS", color="#e45756")
+                ax.bar(x + width / 2, bps, width, label="BPS(MB/s)", color="#72b7b2")
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+                ax.legend(fontsize=8)
+                ax.grid(axis="y", alpha=0.25, linestyle="--")
+            else:
+                ax.text(0.5, 0.5, "无攻击源数据", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title("高风险攻击源带宽/包速率对比")
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        filename = self._artifact_filename("operator_dashboard_png", "png", file_tag)
+        filepath = f"{self.output_dir}/{filename}"
+        fig.savefig(filepath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("[REPORT] 运营视角看板保存: %s", filepath)
         return filepath
 
     def export_attack_situation_report(
@@ -995,12 +1536,31 @@ class ReportGenerator:
         logger.info("[REPORT] 总体攻击态势说明导出: %s", filepath)
         return filepath
 
+    @staticmethod
+    def _choose_timeline_format(time_delta_ns) -> str:
+        """根据时间跨度选择 X 轴标签格式。"""
+        try:
+            import pandas as pd
+            if isinstance(time_delta_ns, (int, float)):
+                td = pd.Timedelta(time_delta_ns, unit="ns")
+            else:
+                td = pd.Timedelta(time_delta_ns)
+            total_seconds = td.total_seconds()
+        except Exception:
+            return "%m-%d %H:%M"
+
+        if total_seconds < 600:       # < 10 min → 秒级
+            return "%H:%M:%S"
+        if total_seconds < 7200:      # < 2 h → 分钟级
+            return "%H:%M"
+        return "%m-%d %H:%M"          # 小时级
+
     def plot_attack_timeline_chart(
         self,
         path_analysis: Dict,
         file_tag: str = "",
     ) -> Optional[str]:
-        """输出攻击时间线趋势图。"""
+        """输出攻击时间线趋势图，X 轴格式自适应时间粒度。"""
         timeline = path_analysis.get("time_distribution") if path_analysis else None
         if timeline is None or not isinstance(timeline, pd.DataFrame) or timeline.empty:
             return None
@@ -1012,6 +1572,14 @@ class ReportGenerator:
             return None
 
         plot_df = timeline.copy().sort_values("hour")
+
+        # 自适应 X 轴时间格式
+        if len(plot_df) >= 2:
+            time_span = plot_df["hour"].iloc[-1] - plot_df["hour"].iloc[0]
+            fmt = self._choose_timeline_format(time_span)
+        else:
+            fmt = "%m-%d %H:%M"
+
         fig, ax1 = plt.subplots(figsize=(12, 5))
         ax1.plot(plot_df["hour"], plot_df["total_packets"], marker="o", color="#e74c3c", label="总包数")
         ax1.set_xlabel("时间")
@@ -1024,10 +1592,19 @@ class ReportGenerator:
         ax2.tick_params(axis="y", labelcolor="#3498db")
 
         ax1.set_title("攻击时间线趋势图")
+        # 自定义 X 轴刻度格式
+        import matplotlib.dates as mdates
+        if fmt == "%H:%M:%S":
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+        elif fmt == "%H:%M":
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        else:
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
         fig.autofmt_xdate(rotation=20)
         fig.tight_layout()
 
-        filepath = f"{self.output_dir}/attack_timeline_chart{file_tag}.png"
+        filename = self._artifact_filename("timeline_chart_png", "png", file_tag)
+        filepath = f"{self.output_dir}/{filename}"
         fig.savefig(filepath, dpi=150, bbox_inches="tight")
         plt.close(fig)
         logger.info("[REPORT] 攻击时间线趋势图保存: %s", filepath)
@@ -1426,7 +2003,7 @@ class ReportGenerator:
 
         import pandas as pd
         df = pd.DataFrame(rows)
-        filename = f"attack_type_detail{file_tag}.csv"
+        filename = self._artifact_filename("per_type_details_csv", "csv", file_tag)
         filepath = f"{self.output_dir}/{filename}"
         df.to_csv(filepath, index=False, encoding="utf-8-sig")
 
