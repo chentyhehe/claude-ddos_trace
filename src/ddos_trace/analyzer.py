@@ -1418,6 +1418,10 @@ class DDoSTracebackAnalyzer:
     def _cluster_fingerprints(self, anomaly_sources: pd.DataFrame):
         """Phase 3: 攻击指纹聚类 — 三级算法降级策略"""
         logger.info("[Phase 3] 攻击指纹聚类")
+        if "traffic_class" in anomaly_sources.columns:
+            anomaly_sources = anomaly_sources[
+                anomaly_sources["traffic_class"].isin(["confirmed", "suspicious"])
+            ]
         if len(anomaly_sources) < self.traceback_config.min_cluster_size:
             logger.info("异常源数量[%d]不足，跳过聚类", len(anomaly_sources))
             return None

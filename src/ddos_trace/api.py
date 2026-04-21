@@ -29,7 +29,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -40,15 +40,18 @@ from ddos_trace.data.alert_loader import AttackContext
 from ddos_trace.data.threat_intel_dashboard import ThreatIntelDashboardRepository
 from ddos_trace.report_browser import build_report_detail_html, build_report_index_html
 from ddos_trace.threat_intel_browser import (
-    build_intel_dashboard_html,
-    build_intel_event_detail_html,
-    build_intel_event_list_html,
     build_intel_source_rank_html,
     build_intel_source_profile_html,
     build_intel_asset_blacklist_html,
     build_intel_asset_whitelist_html,
     build_intel_asset_tags_html,
     build_intel_asset_feedback_html,
+)
+from ddos_trace.threat_intel_pages import (
+    build_intel_dashboard_html,
+    build_intel_event_detail_html,
+    build_intel_event_list_html,
+    build_intel_event_attachments_html,
 )
 
 logger = logging.getLogger(__name__)
@@ -292,6 +295,10 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     async def intel_event_detail(event_id: str):
         return HTMLResponse(build_intel_event_detail_html(event_id))
 
+    @app.get("/intel/events/{event_id}/attachments", response_class=HTMLResponse)
+    async def intel_event_attachments_page(event_id: str):
+        return HTMLResponse(build_intel_event_attachments_html(event_id))
+
     @app.get("/intel/sources", response_class=HTMLResponse)
     async def intel_source_rank_page():
         return HTMLResponse(build_intel_source_rank_html())
@@ -346,6 +353,17 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     # ------------------------------------------------------------------
     # 威胁情报 — 事件列表（带筛选分页）
     # ------------------------------------------------------------------
+
+    @app.delete("/api/v1/intel/events/{event_id}")
+    async def intel_event_delete_api(event_id: str):
+        try:
+            result = threat_intel_repo.delete_event_result(event_id=event_id)
+        except Exception as exc:
+            logger.error("[API] 删除威胁情报事件失败 / event_id[%s] / error[%s]", event_id, exc)
+            raise HTTPException(status_code=500, detail=f"删除事件失败: {exc}")
+        if not result.get("deleted"):
+            raise HTTPException(status_code=404, detail="event not found")
+        return result
 
     @app.get("/api/v1/intel/events_filtered")
     async def intel_events_filtered_api(
@@ -410,6 +428,14 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             logger.error("[API] 地域排行查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
 
+    @app.get("/api/v1/intel/prefix_clusters")
+    async def intel_prefix_clusters_api(limit: int = Query(20, ge=1, le=100)):
+        try:
+            return {"items": threat_intel_repo.get_prefix_clusters(limit=limit)}
+        except Exception as exc:
+            logger.error("[API] 网段聚类查询失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
     # ------------------------------------------------------------------
     # 威胁情报 — 源 IP 画像
     # ------------------------------------------------------------------
@@ -440,6 +466,44 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         except Exception as exc:
             logger.error("[API] 黑名单查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
+
+    @app.post("/api/v1/intel/assets/blacklist")
+    async def intel_asset_add_blacklist(request: dict = Body(default={})):
+        indicator_type = request.get("indicator_type", "ip")
+        indicator_value = request.get("indicator_value", "").strip()
+        if not indicator_value:
+            raise HTTPException(status_code=400, detail="indicator_value 不能为空")
+        try:
+            result = threat_intel_repo.add_to_blacklist(
+                indicator_type=indicator_type,
+                indicator_value=indicator_value,
+                severity=request.get("severity", "high"),
+                confidence_score=float(request.get("confidence_score", 80.0)),
+                source_name=request.get("source_name", "manual"),
+                reason=request.get("reason", ""),
+                created_by=request.get("created_by", "operator"),
+            )
+        except Exception as exc:
+            logger.error("[API] 黑名单添加失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"添加失败: {exc}")
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("message", "添加失败"))
+        return result
+
+    @app.post("/api/v1/intel/assets/blacklist/deactivate")
+    async def intel_asset_deactivate_blacklist(request: dict = Body(default={})):
+        try:
+            result = threat_intel_repo.deactivate_blacklist(
+                indicator_type=request.get("indicator_type", "ip"),
+                indicator_value=str(request.get("indicator_value", "")).strip(),
+                blacklist_id=request.get("blacklist_id"),
+            )
+        except Exception as exc:
+            logger.error("[API] 黑名单解除失败 / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"解除失败: {exc}")
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("message", "解除失败"))
+        return result
 
     @app.get("/api/v1/intel/assets/whitelist")
     async def intel_asset_whitelist_api(

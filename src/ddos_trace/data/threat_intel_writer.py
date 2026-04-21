@@ -1,7 +1,9 @@
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
+from urllib.parse import quote
 
 import pandas as pd
 
@@ -105,6 +107,15 @@ class ThreatIntelWriter:
         client = self._get_clickhouse_client()
         client.execute(sql, params or {})
 
+    def _table_exists(self, table_name: str) -> bool:
+        client = self._get_clickhouse_client()
+        db = self.config.clickhouse_database
+        rows = client.execute(
+            "SELECT name FROM system.tables WHERE database = %(db)s AND name = %(table)s LIMIT 1",
+            {"db": db, "table": table_name},
+        )
+        return bool(rows)
+
     @staticmethod
     def _quote_literal(value: object) -> str:
         text = str(value or "")
@@ -140,6 +151,15 @@ class ThreatIntelWriter:
                 f"ALTER TABLE {db}.{table_name} DELETE WHERE event_id = %(event_id)s SETTINGS mutations_sync = 1",
                 {"event_id": event_id},
             )
+
+        try:
+            if self._table_exists("ti_event_artifact_local"):
+                self._execute(
+                    f"ALTER TABLE {db}.ti_event_artifact_local DELETE WHERE event_id = %(event_id)s SETTINGS mutations_sync = 1",
+                    {"event_id": event_id},
+                )
+        except Exception as exc:
+            logger.warning("[THREAT_INTEL] 附件元数据清理失败，继续回流主数据 / event_id[%s] / error[%s]", event_id, exc)
 
         if features is not None and not features.empty:
             ip_clause = self._build_in_clause(features.index.map(str).tolist())
@@ -191,6 +211,7 @@ class ThreatIntelWriter:
             self._insert_ip_profiles(features, cluster_report)
             self._insert_cluster_profiles(cluster_report, features)
             self._insert_path_analysis(event_meta, path_analysis)
+            self._insert_event_artifacts(event_meta)
             self._insert_daily_stats(event_meta, features)
         except Exception as exc:
             logger.exception("[THREAT_INTEL] 回流业务表失败 / error[%s]", exc)
@@ -501,6 +522,82 @@ class ThreatIntelWriter:
             return
         rows = [row_builder(row) for _, row in df.iterrows()]
         self._batch_insert(table_name, columns, rows)
+
+    def _insert_event_artifacts(self, event_meta: Dict[str, object]) -> None:
+        """Persist optional output files as attachment metadata, not as primary evidence."""
+        event_id = str(event_meta.get("event_id", "") or "").strip()
+        output_dir = str(event_meta.get("output_dir", "") or "").strip()
+        if not event_id or not output_dir:
+            return
+
+        output_path = Path(output_dir)
+        if not output_path.exists() or not output_path.is_dir():
+            return
+
+        priority_map = {
+            "attack_overview": 10,
+            "source_risk_dashboard": 20,
+            "operator_dashboard": 30,
+            "overall_profile_radar": 40,
+            "suspect_source_radar": 50,
+            "attack_timeline": 60,
+            "type_profile_radar": 70,
+            "overview_report": 80,
+            "summary": 90,
+        }
+        mime_map = {
+            ".png": "image/png",
+            ".md": "text/markdown",
+            ".json": "application/json",
+            ".csv": "text/csv",
+        }
+        columns = [
+            "event_id", "artifact_name", "artifact_title", "artifact_kind", "file_ext",
+            "file_size", "mime_type", "storage_uri", "download_url", "checksum",
+            "priority", "created_time",
+        ]
+        rows = []
+        for file_path in sorted(output_path.iterdir()):
+            if not file_path.is_file():
+                continue
+            suffix = file_path.suffix.lower()
+            if suffix not in mime_map:
+                continue
+            kind = "image" if suffix == ".png" else "report" if suffix in {".md", ".json"} else "table"
+            priority = 999
+            for key, value in priority_map.items():
+                if key in file_path.name:
+                    priority = value
+                    break
+            storage_uri = str(file_path.resolve())
+            try:
+                rel_path = file_path.resolve().relative_to(Path.cwd().resolve() / "output").as_posix()
+                download_url = f"/artifacts/{quote(rel_path, safe='/')}"
+            except ValueError:
+                download_url = ""
+            rows.append([
+                event_id,
+                file_path.name,
+                file_path.stem.replace("_", " "),
+                kind,
+                suffix.lstrip("."),
+                int(file_path.stat().st_size),
+                mime_map[suffix],
+                storage_uri,
+                download_url,
+                "",
+                int(priority),
+                self._to_native(event_meta.get("updated_at") or datetime.now()),
+            ])
+
+        if not rows:
+            return
+        if not self._table_exists("ti_event_artifact_local"):
+            return
+        try:
+            self._batch_insert("ti_event_artifact_local", columns, rows)
+        except Exception as exc:
+            logger.warning("[THREAT_INTEL] 附件元数据回流失败，不影响分析主数据 / event_id[%s] / error[%s]", event_id, exc)
 
     def _insert_daily_stats(self, event_meta: Dict[str, object], features: Optional[pd.DataFrame]) -> None:
         if features is None or features.empty:

@@ -712,6 +712,13 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
       if (Math.abs(num) >= 1000) return (num / 1000).toFixed(1) + 'K';
       return String(Math.round(num * 100) / 100);
     }};
+    const fmtBps = (value) => {{
+      const num = toNumber(value);
+      if (num >= 1e9) return (num / 1e9).toFixed(2) + ' Gbps';
+      if (num >= 1e6) return (num / 1e6).toFixed(2) + ' Mbps';
+      if (num >= 1e3) return (num / 1e3).toFixed(1) + ' Kbps';
+      return num + ' bps';
+    }};
     const safeText = (value, fallback = '-') => {{
       if (value === null || value === undefined || value === '') return fallback;
       return String(value);
@@ -744,25 +751,41 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
         el.innerHTML = '<div class="empty">暂无趋势数据</div>';
         return;
       }}
-      const width = 780, height = 240, pad = 24;
-      const step = points.length === 1 ? 0 : (width - pad * 2) / (points.length - 1);
+      const width = 780, height = 240, padL = 50, padR = 24, padT = 28, padB = 28;
+      const chartW = width - padL - padR, chartH = height - padT - padB;
+      const step = points.length === 1 ? 0 : chartW / (points.length - 1);
+      const globalMax = Math.max(...series.map(s => Math.max(...points.map(p => toNumber(p[s.key])), 1)));
+      const yTicks = 4;
+      const yLabels = Array.from({{length: yTicks + 1}}, (_, i) => {{
+        const val = Math.round(globalMax * (1 - i / yTicks));
+        const y = padT + (i / yTicks) * chartH;
+        return `<text x="${{padL - 6}}" y="${{y + 4}}" font-size="9" text-anchor="end" fill="#7690b0">${{fmt(val)}}</text><line x1="${{padL}}" y1="${{y}}" x2="${{width - padR}}" y2="${{y}}" stroke="rgba(125,173,255,0.06)" stroke-width="1"/>`;
+      }}).join('');
       const lines = series.map(item => {{
         const maxValue = Math.max(...points.map(point => toNumber(point[item.key])), 1);
         const path = points.map((point, index) => {{
-          const x = pad + step * index;
-          const y = height - pad - (toNumber(point[item.key]) / maxValue) * (height - pad * 2);
+          const x = padL + step * index;
+          const y = padT + chartH - (toNumber(point[item.key]) / maxValue) * chartH;
           return `${{index === 0 ? 'M' : 'L'}} ${{x}} ${{y}}`;
         }}).join(' ');
-        return `<path d="${{path}}" fill="none" stroke="${{item.color}}" stroke-width="4" stroke-linecap="round"></path>`;
+        return `<path d="${{path}}" fill="none" stroke="${{item.color}}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>`;
+      }}).join('');
+      const dots = series.map(item => {{
+        const maxValue = Math.max(...points.map(point => toNumber(point[item.key])), 1);
+        return points.map((point, index) => {{
+          const x = padL + step * index;
+          const y = padT + chartH - (toNumber(point[item.key]) / maxValue) * chartH;
+          return `<circle cx="${{x}}" cy="${{y}}" r="3" fill="${{item.color}}" opacity="0.7"><title>${{safeText(item.label)}}: ${{fmt(toNumber(point[item.key]))}}</title></circle>`;
+        }}).join('');
       }}).join('');
       const labels = points.map((point, index) => {{
-        const x = pad + step * index;
+        const x = padL + step * index;
         const raw = point.day || point.bucket_time || point.month || '';
         const text = String(raw).slice(5, 10) || String(raw);
-        return `<text x="${{x}}" y="${{height - 6}}" font-size="10" text-anchor="middle" fill="#806d5c">${{text}}</text>`;
+        return `<text x="${{x}}" y="${{height - 6}}" font-size="10" text-anchor="middle" fill="#7690b0">${{text}}</text>`;
       }}).join('');
-      const legend = series.map((item, index) => `<text x="${{pad + index * 120}}" y="18" font-size="12" fill="${{item.color}}">${{item.label}}</text>`).join('');
-      el.innerHTML = `<svg viewBox="0 0 ${{width}} ${{height}}" preserveAspectRatio="none">${{legend}}${{lines}}${{labels}}</svg>`;
+      const legend = series.map((item, index) => `<circle cx="${{padL + index * 100 + 6}}" cy="12" r="4" fill="${{item.color}}"/><text x="${{padL + index * 100 + 14}}" y="16" font-size="11" fill="${{item.color}}">${{item.label}}</text>`).join('');
+      el.innerHTML = `<svg viewBox="0 0 ${{width}} ${{height}}" preserveAspectRatio="xMidYMid meet">${{legend}}${{yLabels}}${{lines}}${{dots}}${{labels}}</svg>`;
     }};
     {script}
   </script>
@@ -1162,72 +1185,254 @@ def build_intel_source_rank_html() -> str:
     body = """
     <section class="grid three">
       <div class="panel">
-        <h2>重复攻击源排行</h2>
-        <div class="subtle">这里关心的是长期活跃、跨事件重复出现的来源，而不是某一次事件中的所有源。</div>
+        <h2>高关注攻击源</h2>
+        <div class="subtle">只看疑似和确认来源，按置信度、攻击规模、峰值流量和事件覆盖度排序。</div>
         <div class="metric-grid" id="sourceStats"></div>
       </div>
       <div class="panel">
         <h2>活跃聚类</h2>
-        <div class="subtle">如果多个源持续落在同一聚类，就更像同一团伙或同类攻击基础设施。</div>
+        <div class="subtle">多个源持续落在同一聚类，可能属于同一团伙或同类攻击基础设施。</div>
         <div class="bar-list" id="clusterRank"></div>
       </div>
       <div class="panel">
         <h2>来源地域排行</h2>
-        <div class="subtle">帮助运营侧快速判断跨区域特征和潜在联动方向。</div>
+        <div class="subtle">帮助判断跨区域特征和潜在联动方向。数字含关联事件数和峰值流速。</div>
         <div class="bar-list" id="geoRank"></div>
       </div>
     </section>
     <section class="panel" style="margin-top:18px;">
+      <h2>僵尸网段识别</h2>
+      <div class="subtle">按 /24 网段聚合攻击源。同一网段内出现多个攻击源时，僵尸主机概率更高，值得重点封堵。</div>
+      <div style="overflow:auto;">
+        <table class="event-table">
+          <thead>
+            <tr>
+              <th>网段 (/24)</th>
+              <th>源 IP 数</th>
+              <th>攻击类型</th>
+              <th>关联事件</th>
+              <th>峰值流速</th>
+              <th>归属地 / 运营商</th>
+              <th>成员 IP</th>
+            </tr>
+          </thead>
+          <tbody id="prefixClusterRows"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel" style="margin-top:18px;">
       <h2>重点攻击源</h2>
-      <div class="subtle">只展示重复出现且具备观察价值的源对象，点击可进入源画像。</div>
+      <div class="subtle">集中展示有效攻击源的事件贡献、攻击特征、归属地和情报命中；背景流量不进入主列表。</div>
       <div style="overflow:auto;">
         <table class="event-table">
           <thead>
             <tr>
               <th>源 IP</th>
+              <th>风险分层</th>
               <th>出现事件数</th>
               <th>最高置信度</th>
-              <th>峰值带宽</th>
               <th>攻击类型</th>
-              <th>地域与运营商</th>
+              <th>攻击特征</th>
+              <th>地域 / 运营商</th>
+              <th>情报命中</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="topSourcesRows"></tbody>
         </table>
       </div>
     </section>
+    <style>
+      .row-suspicious { background: rgba(255, 180, 87, 0.10) !important; border-left: 3px solid var(--warn) !important; }
+      .row-confirmed { background: rgba(255, 111, 145, 0.08) !important; border-left: 3px solid var(--danger) !important; }
+      .row-borderline { background: rgba(89, 240, 177, 0.06) !important; border-left: 3px solid var(--good) !important; }
+      .btn-blacklist {
+        display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;border-radius:999px;
+        border:1px solid rgba(255,111,145,0.24);background:rgba(255,111,145,0.10);color:var(--danger);
+        font-size:12px;font-weight:700;cursor:pointer;transition:background 160ms ease;
+      }
+      .btn-blacklist:hover { background:rgba(255,111,145,0.22); }
+      .btn-events {
+        display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;border-radius:999px;
+        border:1px solid rgba(66,232,224,0.24);background:rgba(66,232,224,0.08);color:var(--accent);
+        font-size:12px;font-weight:700;cursor:pointer;transition:background 160ms ease;
+      }
+      .btn-events:hover { background:rgba(66,232,224,0.18); }
+      .popup-overlay {
+        position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;display:flex;align-items:center;justify-content:center;
+        backdrop-filter:blur(6px);
+      }
+      .popup-card {
+        background:var(--panel);border:1px solid var(--line);border-radius:24px;padding:24px;max-width:520px;width:90%;
+        box-shadow:var(--shadow-outer);max-height:80vh;overflow:auto;
+      }
+      .popup-card h3 { margin:0 0 12px;font-size:18px; }
+      .popup-close {
+        float:right;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;
+      }
+    </style>
     """
     script = """
-    fetch('/api/v1/intel/top_sources?limit=30&min_events=2')
+    const showEventPopup = (ip, eventIds) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'popup-overlay';
+      const listHtml = eventIds.length ? eventIds.map(id =>
+        `<li style="margin-bottom:8px;"><a href="/intel/events/${encodeURIComponent(id)}" style="color:var(--accent);text-decoration:none;">${safeText(id)}</a></li>`
+      ).join('') : '<li>无关联事件</li>';
+      overlay.innerHTML = `<div class="popup-card">
+        <button class="popup-close" onclick="this.closest('.popup-overlay').remove()">&times;</button>
+        <h3>${safeText(ip)} 关联事件</h3>
+        <div class="subtle">该攻击源参与的攻击事件列表（近 30 天）</div>
+        <ul style="list-style:none;padding:0;">${listHtml}</ul>
+      </div>`;
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+      document.body.appendChild(overlay);
+    };
+
+    const addToBlacklist = async (ip, confidence, attackTypes) => {
+      const types = Array.isArray(attackTypes) ? attackTypes.join('、') : (attackTypes || '未识别');
+      if (!confirm(`确认将 ${ip} 加入黑名单吗？\\n\\n置信度：${fmt(confidence)}\\n攻击类型：${types}`)) return;
+      try {
+        const res = await fetch('/api/v1/intel/assets/blacklist', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            indicator_type: 'ip',
+            indicator_value: ip,
+            severity: confidence >= 80 ? 'high' : 'medium',
+            confidence_score: confidence,
+            source_name: 'manual',
+            reason: `从攻击源排行加入，攻击类型：${types}，置信度：${confidence}`
+          })
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText);
+        }
+        alert(`${ip} 已成功加入黑名单`);
+        location.reload();
+      } catch (err) {
+        alert(`加入黑名单失败：${err.message}`);
+      }
+    };
+
+    fetch('/api/v1/intel/top_sources?limit=30&min_events=1')
       .then(res => { if (!res.ok) throw new Error('top source fetch failed'); return res.json(); })
       .then(data => {
         document.getElementById('sourceStats').innerHTML = [
-          ['重复攻击源', fmt(data.total_repeat_sources), '近 30 天重复出现的源对象'],
-          ['最高重复次数', fmt(data.max_repeat_count), '单一源对象重复出现的最高次数'],
-          ['跨目标来源', fmt(data.cross_target_sources), '同一来源打到多个事件或目标']
+          ['高关注攻击源', fmt(data.total_repeat_sources), '近 30 天疑似及确认来源'],
+          ['最高关联事件', fmt(data.max_repeat_count), '单一来源关联事件数'],
+          ['跨事件来源', fmt(data.cross_target_sources), '同一来源命中多个事件']
         ].map(item => `<div class="metric"><div class="label">${item[0]}</div><div class="value">${item[1]}</div><div class="hint">${item[2]}</div></div>`).join('');
 
         const items = data.items || [];
-        document.getElementById('topSourcesRows').innerHTML = items.length ? items.map(item => `
-          <tr class="clickable" onclick="location.href='/intel/sources/${encodeURIComponent(item.src_ip)}'">
-            <td>${safeText(item.src_ip)}</td>
-            <td>${fmt(item.event_count)}</td>
+        document.getElementById('topSourcesRows').innerHTML = items.length ? items.map(item => {
+          const intel = item.intel || {};
+          const tags = [];
+          if (toNumber(intel.blacklist_hit) > 0) tags.push('黑名单');
+          if (toNumber(intel.whitelist_hit) > 0) tags.push('白名单');
+          if (Array.isArray(intel.manual_tags)) intel.manual_tags.forEach(tag => tags.push(tag));
+          const geo = [item.country, item.province, item.city, item.isp].filter(Boolean).join(' / ') || '未标注';
+          const attackTypes = Array.isArray(item.attack_type_list) ? item.attack_type_list.filter(Boolean) : [];
+          const eventIds = Array.isArray(item.event_ids) ? item.event_ids : [];
+          /* 修复风险分层逻辑：优先用 traffic_class，仅当为空时才用置信度推断 */
+          const rawClass = safeText(item.traffic_class, '');
+          const trafficClass = (rawClass === 'confirmed' || rawClass === 'suspicious' || rawClass === 'borderline')
+            ? rawClass
+            : (toNumber(item.max_confidence) >= 80 ? 'confirmed' : 'suspicious');
+          const rowClass = trafficClass === 'confirmed' ? 'row-confirmed' : trafficClass === 'suspicious' ? 'row-suspicious' : trafficClass === 'borderline' ? 'row-borderline' : '';
+          const badgeClass = trafficClass === 'confirmed' ? 'high' : trafficClass === 'suspicious' ? 'medium' : 'low';
+          const classLabel = trafficClass === 'confirmed' ? '确认' : trafficClass === 'suspicious' ? '疑似' : trafficClass === 'borderline' ? '边界' : trafficClass;
+          const features = [];
+          if (toNumber(item.max_pps) > 0) features.push(`PPS ${fmt(item.max_pps)}`);
+          if (toNumber(item.max_bps) > 0) features.push(`峰值流速 ${fmtBps(item.max_bps)}`);
+          if (toNumber(item.max_burst_ratio) > 0) features.push(`burst ${fmt(item.max_burst_ratio)}`);
+          if (toNumber(item.cluster_id)) features.push(`聚类 ${item.cluster_id}`);
+          const contribution = [
+            eventIds.length ? `event ${eventIds.slice(0, 2).join(' / ')}` : '',
+            item.last_seen ? `last ${safeText(item.last_seen)}` : ''
+          ].filter(Boolean).join('<br>');
+          const alreadyBlacklisted = toNumber(intel.blacklist_hit) > 0;
+          const eventDataAttr = encodeURIComponent(JSON.stringify(eventIds)).replace(/'/g, '&#39;');
+          return `<tr class="${rowClass}">
+            <td><a href="/intel/sources/${encodeURIComponent(item.src_ip)}" style="color:var(--accent);text-decoration:none;">${safeText(item.src_ip)}</a></td>
+            <td><span class="status-badge ${badgeClass}">${classLabel}</span></td>
+            <td><button class="btn-events" data-ip="${safeText(item.src_ip)}" data-events='${eventDataAttr}'>${fmt(item.event_count)} 个事件</button><div style="margin-top:6px;font-size:11px;color:var(--muted);">${contribution || '-'}</div></td>
             <td>${fmt(item.max_confidence)}</td>
-            <td>${fmt(item.max_bps)}</td>
-            <td>${(item.attack_type_list || []).join('、') || '未识别'}</td>
-            <td>${[item.country, item.province, item.isp].filter(Boolean).join(' / ') || '未标注'}</td>
-          </tr>
-        `).join('') : '<tr><td colspan="6" class="empty">暂无重复攻击源</td></tr>';
+            <td>${attackTypes.join('、') || '未识别'}</td>
+            <td style="font-size:12px;color:var(--muted);">${features.join('；') || '-'}</td>
+            <td>${geo}</td>
+            <td>${tags.length ? tags.map(tag => `<span class="chip" style="font-size:11px;">${safeText(tag)}</span>`).join('') : '-'}</td>
+            <td>${alreadyBlacklisted ? '<span style="color:var(--muted);font-size:12px;">已在黑名单</span>' : `<button class="btn-blacklist" data-blacklist-ip="${safeText(item.src_ip)}" data-blacklist-confidence="${toNumber(item.max_confidence)}" data-blacklist-types='${encodeURIComponent(JSON.stringify(attackTypes))}'>加入黑名单</button>`}</td>
+          </tr>`;
+        }).join('') : '<tr><td colspan="9" class="empty">暂无重复攻击源</td></tr>';
+
+        /* 事件弹窗按钮绑定 */
+        document.querySelectorAll('.btn-events').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const ip = btn.dataset.ip;
+            const eventIds = JSON.parse(decodeURIComponent(btn.dataset.events));
+            showEventPopup(ip, eventIds);
+          });
+        });
+
+        /* 黑名单按钮绑定 */
+        document.querySelectorAll('[data-blacklist-ip]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const ip = btn.dataset.blacklistIp;
+            const confidence = toNumber(btn.dataset.blacklistConfidence);
+            const types = JSON.parse(decodeURIComponent(btn.dataset.blacklistTypes));
+            addToBlacklist(ip, confidence, types);
+          });
+        });
       })
-      .catch(() => { document.getElementById('topSourcesRows').innerHTML = '<tr><td colspan="6" class="empty">攻击源排行加载失败</td></tr>'; });
-    fetch('/api/v1/intel/clusters?limit=10').then(res => res.ok ? res.json() : { items: [] }).then(data => renderBarList('clusterRank', data.items || [], 'cluster_id', 'member_count', 'good'));
-    fetch('/api/v1/intel/geo_rank?limit=10').then(res => res.ok ? res.json() : { items: [] }).then(data => renderBarList('geoRank', (data.items || []).map(item => ({ ...item, display: [item.country, item.province, item.isp_name].filter(Boolean).join(' / ') })), 'display', 'ip_count', 'soft'));
+      .catch(() => { document.getElementById('topSourcesRows').innerHTML = '<tr><td colspan="9" class="empty">攻击源排行加载失败</td></tr>'; });
+    fetch('/api/v1/intel/clusters?limit=10').then(res => res.ok ? res.json() : { items: [] }).then(data => {
+      const clusterItems = (data.items || []).map(item => {
+        const types = Array.isArray(item.attack_type_list) ? item.attack_type_list.filter(Boolean).join('、') : '';
+        return { ...item, display: `${safeText(item.cluster_id)}${types ? ' (' + types + ')' : ''}` };
+      });
+      renderBarList('clusterRank', clusterItems, 'display', 'member_count', 'good');
+    });
+    fetch('/api/v1/intel/geo_rank?limit=10').then(res => res.ok ? res.json() : { items: [] }).then(data => {
+      const geoItems = (data.items || []).map(item => ({
+        ...item,
+        display: [item.country, item.province, item.isp_name].filter(Boolean).join(' / '),
+        geo_detail: `${fmt(item.ip_count)} IP / ${fmt(item.event_count)} 事件 / 峰值 ${fmtBps(item.peak_bps)}`
+      }));
+      const maxGeo = Math.max(...geoItems.map(i => toNumber(i.ip_count)), 1);
+      document.getElementById('geoRank').innerHTML = geoItems.length ? geoItems.map(item => {
+        const value = toNumber(item.ip_count);
+        const width = Math.max(8, Math.round((value / maxGeo) * 100));
+        return `<div class="bar-item"><div class="bar-head"><span>${safeText(item.display, '未标注')}</span><strong>${safeText(item.geo_detail)}</strong></div><div class="bar-track"><div class="bar-fill soft" style="width:${width}%"></div></div></div>`;
+      }).join('') : '<div class="empty">暂无地域数据</div>';
+    });
+    fetch('/api/v1/intel/prefix_clusters?limit=20').then(res => res.ok ? res.json() : { items: [] }).then(data => {
+      const items = data.items || [];
+      document.getElementById('prefixClusterRows').innerHTML = items.length ? items.map(item => {
+        const types = Array.isArray(item.attack_type_list) ? item.attack_type_list.filter(Boolean).join('、') : '未识别';
+        const members = Array.isArray(item.member_ips) ? item.member_ips : [];
+        const showMembers = members.slice(0, 5).join('、');
+        const more = members.length > 5 ? `等 ${members.length} 个` : '';
+        const geo = [item.country, item.province, item.isp].filter(Boolean).join(' / ') || '未知';
+        const riskStyle = toNumber(item.ip_count) >= 5 ? 'color:var(--danger);font-weight:800;' : toNumber(item.ip_count) >= 3 ? 'color:var(--warn);font-weight:700;' : '';
+        return `<tr>
+          <td><span style="${{riskStyle}}">${safeText(item.ip_prefix)}.0/24</span></td>
+          <td>${fmt(item.ip_count)}</td>
+          <td>${safeText(types)}</td>
+          <td>${fmt(item.event_count)}</td>
+          <td>${fmtBps(item.max_bps)}</td>
+          <td>${safeText(geo)}</td>
+          <td style="font-size:12px;color:var(--muted);">${safeText(showMembers)}${safeText(more)}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">暂无网段聚类数据（需要同一网段内有 2 个以上攻击源）</td></tr>';
+    });
     """
     return _intel_page(
         title="威胁情报攻击源排行",
         active="sources",
-        hero_title="攻击源排行",
-        hero_subtitle="攻击源页更像一个长期画像面板，重点不是单次事件，而是哪些来源反复出现、是否形成稳定聚类、是否具备情报命中。",
+        hero_title="高关注攻击源",
+        hero_subtitle="聚焦疑似与确认来源：谁在贡献攻击、具备哪些攻击特征、是否应该进入处置资产。",
         body=body,
         script=script,
     )
@@ -1357,15 +1562,81 @@ def _asset_page(title: str, endpoint: str, hero_title: str, hero_subtitle: str, 
 
 
 def build_intel_asset_blacklist_html() -> str:
-    return _asset_page(
-        title="威胁情报黑名单资产",
-        endpoint="/api/v1/intel/assets/blacklist",
-        hero_title="黑名单资产",
-        hero_subtitle="黑名单页服务于先验风险识别，重点看是否仍然生效、来源是否可靠、理由是否清楚。",
-        columns="<th>对象值</th><th>严重级别</th><th>置信分</th><th>来源</th><th>状态</th><th>生效时间</th>",
-        row_template="<tr><td>${safeText(item.indicator_value)}</td><td>${safeText(item.severity)}</td><td>${fmt(item.confidence_score)}</td><td>${safeText(item.source_name)}</td><td>${safeText(item.status)}</td><td>${safeText(item.effective_from)}</td></tr>",
-        query="?status=active&page=1&page_size=20",
-    )
+    body = """
+    <section class="panel">
+      <h2>黑名单资产</h2>
+      <div class="subtle">黑名单页服务于先验风险识别，重点看是否仍然生效、来源是否可靠、理由是否清楚。</div>
+      <div style="overflow:auto;">
+        <table class="event-table">
+          <thead>
+            <tr>
+              <th>对象值</th>
+              <th>严重级别</th>
+              <th>置信分</th>
+              <th>来源</th>
+              <th>状态</th>
+              <th>生效时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="assetRows"></tbody>
+        </table>
+      </div>
+    </section>
+    <style>
+      .btn-release {
+        display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;border-radius:999px;
+        border:1px solid rgba(66,232,224,0.24);background:rgba(66,232,224,0.08);color:var(--accent);
+        font-size:12px;font-weight:700;cursor:pointer;
+      }
+      .btn-release:hover { background:rgba(66,232,224,0.18); }
+    </style>
+    """
+    script = """
+    const releaseBlacklist = async (item) => {
+      const value = safeText(item.indicator_value);
+      if (!confirm(`确认解除 ${value} 的黑名单状态吗？`)) return;
+      try {
+        const res = await fetch('/api/v1/intel/assets/blacklist/deactivate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            blacklist_id: item.blacklist_id,
+            indicator_type: item.indicator_type || 'ip',
+            indicator_value: value
+          })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        location.reload();
+      } catch (err) {
+        alert(`解除失败：${err.message}`);
+      }
+    };
+
+    fetch('/api/v1/intel/assets/blacklist?status=active&page=1&page_size=20')
+      .then(res => { if (!res.ok) throw new Error('asset fetch failed'); return res.json(); })
+      .then(data => {
+        const items = data.items || [];
+        document.getElementById('assetRows').innerHTML = items.length ? items.map((item, index) => `
+          <tr>
+            <td>${safeText(item.indicator_value)}</td>
+            <td>${safeText(item.severity)}</td>
+            <td>${fmt(item.confidence_score)}</td>
+            <td>${safeText(item.source_name)}</td>
+            <td>${safeText(item.status)}</td>
+            <td>${safeText(item.effective_from || item.created_time)}</td>
+            <td><button class="btn-release" data-release-index="${index}">解除</button></td>
+          </tr>
+        `).join('') : '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+        document.querySelectorAll('[data-release-index]').forEach(btn => {
+          btn.addEventListener('click', () => releaseBlacklist(items[toNumber(btn.dataset.releaseIndex)] || {}));
+        });
+      })
+      .catch(() => {
+        document.getElementById('assetRows').innerHTML = '<tr><td colspan="7" class="empty">数据加载失败</td></tr>';
+      });
+    """
+    return _intel_page("威胁情报黑名单资产", "assets", "黑名单资产", "管理当前生效的黑名单对象，支持人工解除。", body, script)
 
 
 def build_intel_asset_whitelist_html() -> str:

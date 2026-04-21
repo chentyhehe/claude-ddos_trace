@@ -457,6 +457,46 @@ CREATE TABLE IF NOT EXISTS threaten_intelligence.ti_event_time_distribution_loca
 ) engine = Distributed('cluster_zyuc', 'threaten_intelligence', 'ti_event_time_distribution_local', rand());
 
 
+-- 事件附件元数据表。详情页图表应优先从数据库分析明细实时绘制，本地文件仅作为可选下载附件。
+CREATE TABLE IF NOT EXISTS threaten_intelligence.ti_event_artifact_local on cluster cluster_zyuc
+(
+    event_id String COMMENT '事件ID',
+    artifact_name String COMMENT '附件文件名',
+    artifact_title String DEFAULT '' COMMENT '附件展示标题',
+    artifact_kind String DEFAULT 'report' COMMENT '附件类型：image/report/table/other',
+    file_ext String DEFAULT '' COMMENT '文件扩展名',
+    file_size UInt64 DEFAULT 0 COMMENT '文件大小',
+    mime_type String DEFAULT '' COMMENT 'MIME 类型',
+    storage_uri String DEFAULT '' COMMENT '持久化存储位置，可为本地路径、对象存储 URI 或其他地址',
+    download_url String DEFAULT '' COMMENT '下载 URL，本地 output 文件可映射到 /artifacts/',
+    checksum String DEFAULT '' COMMENT '文件校验值，暂可为空',
+    priority UInt16 DEFAULT 999 COMMENT '附件展示排序',
+    created_time DateTime DEFAULT now() COMMENT '记录创建时间'
+)
+engine = ReplicatedMergeTree(
+                                    '/clickhouse/threaten_intelligence/tables/{shard}/ti_event_artifact_local', '{replica}')
+    PARTITION BY toYYYYMM(created_time)
+    ORDER BY (event_id, priority, artifact_name)
+    TTL created_time + toIntervalMonth(36)
+    SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS threaten_intelligence.ti_event_artifact_local_dist on cluster cluster_zyuc
+(
+    event_id String COMMENT '事件ID',
+    artifact_name String COMMENT '附件文件名',
+    artifact_title String DEFAULT '' COMMENT '附件展示标题',
+    artifact_kind String DEFAULT 'report' COMMENT '附件类型：image/report/table/other',
+    file_ext String DEFAULT '' COMMENT '文件扩展名',
+    file_size UInt64 DEFAULT 0 COMMENT '文件大小',
+    mime_type String DEFAULT '' COMMENT 'MIME 类型',
+    storage_uri String DEFAULT '' COMMENT '持久化存储位置，可为本地路径、对象存储 URI 或其他地址',
+    download_url String DEFAULT '' COMMENT '下载 URL，本地 output 文件可映射到 /artifacts/',
+    checksum String DEFAULT '' COMMENT '文件校验值，暂可为空',
+    priority UInt16 DEFAULT 999 COMMENT '附件展示排序',
+    created_time DateTime DEFAULT now() COMMENT '记录创建时间'
+) engine = Distributed('cluster_zyuc', 'threaten_intelligence', 'ti_event_artifact_local', rand());
+
+
 -- 人工反馈表
 CREATE TABLE IF NOT EXISTS threaten_intelligence.ti_feedback_local on cluster cluster_zyuc
 (

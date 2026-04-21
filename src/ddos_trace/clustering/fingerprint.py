@@ -23,6 +23,7 @@
     AttackFingerprintClusterer: 聚类分析入口
 """
 
+import ipaddress
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -84,6 +85,7 @@ class AttackFingerprintClusterer:
 
         scaler = RobustScaler()
         X_scaled = scaler.fit_transform(X)
+        X_scaled = self._append_ip_prefix_feature(X_scaled, features)
 
         # 大数据保护: 当样本数超过阈值时，随机采样后训练
         # 采样后通过 1-NN 将标签回传到全量样本，避免 OOM
@@ -124,6 +126,32 @@ class AttackFingerprintClusterer:
             report["cluster_id"].nunique(),
         )
         return report
+
+    def _append_ip_prefix_feature(self, X_scaled: np.ndarray, features: pd.DataFrame) -> np.ndarray:
+        """Add a weak /24 prefix feature so nearby source IPs are slightly easier to cluster."""
+        if X_scaled.size == 0 or features.empty:
+            return X_scaled
+
+        prefixes = [self._ip_prefix(str(ip)) for ip in features.index]
+        if len(set(prefixes)) <= 1:
+            return X_scaled
+
+        codes = pd.Series(prefixes).astype("category").cat.codes.to_numpy(dtype=float).reshape(-1, 1)
+        from sklearn.preprocessing import RobustScaler
+
+        prefix_scaled = RobustScaler().fit_transform(codes)
+        return np.hstack([X_scaled * 0.90, prefix_scaled * 0.10])
+
+    @staticmethod
+    def _ip_prefix(value: str) -> str:
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            return value.strip()
+        if ip.version == 4:
+            parts = value.split(".")
+            return ".".join(parts[:3]) if len(parts) >= 3 else value
+        return ":".join(ip.exploded.split(":")[:4])
 
     # ------------------------------------------------------------------
     # 三级算法降级
@@ -313,6 +341,9 @@ class AttackFingerprintClusterer:
                 "member_count": len(group),
                 "member_ips": ",".join(group.index.astype(str)),
             }
+            prefix_counts = pd.Series([self._ip_prefix(str(ip)) for ip in group.index]).value_counts()
+            row["ip_prefix_count"] = int(prefix_counts.size)
+            row["top_ip_prefixes"] = ",".join(prefix_counts.head(3).index.astype(str))
             # 平均指纹特征
             for col in feature_cols:
                 if col in group.columns:
