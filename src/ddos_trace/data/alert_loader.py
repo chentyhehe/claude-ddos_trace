@@ -16,12 +16,12 @@
 """
 
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
 
 import pandas as pd
 
+from ddos_trace._compat import dataclass, field
 from ddos_trace.config.models import ClickHouseConfig
 
 logger = logging.getLogger(__name__)

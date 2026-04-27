@@ -28,7 +28,7 @@ class ThreatIntelDashboardRepository:
         self._lookup = ThreatIntelLookup(mysql_config, self.config)
         self._ch_client = None
         self._table_cache: Dict[str, str] = {}
-        self._output_root = (Path(os.getcwd()) / "output").resolve()
+        self._output_root = Path(self.config.output_root or "./output").resolve()
 
     def _build_clickhouse_params(self) -> Dict[str, object]:
         return {
@@ -259,6 +259,16 @@ class ThreatIntelDashboardRepository:
             "tables": [item for item in items if item["kind"] == "table"],
         }
 
+    def _build_artifact_url(self, path_value: str) -> str:
+        path_text = str(path_value or "").strip()
+        if not path_text:
+            return ""
+        try:
+            rel_path = Path(path_text).resolve().relative_to(self._output_root).as_posix()
+        except (ValueError, OSError):
+            return ""
+        return f"/artifacts/{quote(rel_path, safe='/')}"
+
     def _query_event_attachments(self, event_id: str, output_dir: str) -> Dict[str, List[Dict[str, str]]]:
         """Return persisted attachment metadata; local files are only a compatibility fallback."""
         db = self.config.clickhouse_database
@@ -292,9 +302,11 @@ class ThreatIntelDashboardRepository:
         items = []
         for row in rows:
             item = dict(row)
-            item["url"] = str(item.get("url") or item.get("storage_uri") or "")
+            item["url"] = str(item.get("url") or "").strip() or self._build_artifact_url(item.get("storage_uri"))
             item["optional"] = True
             items.append(item)
+        if not items:
+            return self._build_artifact_gallery(output_dir)
         return {
             "all": items,
             "images": [item for item in items if item.get("kind") == "image"],
@@ -761,11 +773,12 @@ class ThreatIntelDashboardRepository:
         cluster_mix = self._select_clickhouse(
             f"""
             SELECT
-                if(cluster_id = '', '未聚类', cluster_id) AS cluster_id,
+                cluster_id,
                 count() AS ip_count,
                 max(attack_confidence) AS max_confidence
             FROM {self.config.clickhouse_database}.{source_table}
             WHERE event_id = %(event_id)s
+              AND cluster_id != ''
             GROUP BY cluster_id
             ORDER BY ip_count DESC, max_confidence DESC
             LIMIT 10
@@ -833,7 +846,7 @@ class ThreatIntelDashboardRepository:
             "top_sources": intel_hits[:10],
             "attachments": attachment_gallery["all"],
             "artifacts": attachment_gallery["all"],
-            "artifact_images": [],
+            "artifact_images": attachment_gallery["images"],
             "artifact_reports": attachment_gallery["reports"],
             "artifact_tables": attachment_gallery["tables"],
         }

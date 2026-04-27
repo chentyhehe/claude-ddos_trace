@@ -1,3 +1,6 @@
+import json
+from html import escape
+
 from ddos_trace.threat_intel_browser import _intel_page
 
 
@@ -10,8 +13,8 @@ def build_intel_dashboard_html() -> str:
     </section>
     <section class="grid two" style="margin-top:18px;">
       <div class="panel">
-        <h2>近 14 天态势变化</h2>
-        <div class="subtle">按日查看事件量、确认源数和峰值流速，判断压力趋势。数据不足时以卡片形式呈现。</div>
+        <h2>最新事件动态</h2>
+        <div class="subtle">直接看最近发生了什么、影响了谁、建议先处理哪一批事件，比稀疏的日趋势更适合值班研判。</div>
         <div id="trendGrid"></div>
       </div>
       <div class="panel">
@@ -116,21 +119,21 @@ def build_intel_dashboard_html() -> str:
           ['24h 峰值流速', fmtBps(overview.peak_bps_24h)]
         ].map(item => `<div class="metric"><div class="label">${item[0]}</div><div class="value">${item[1]}</div></div>`).join('');
 
-        /* 趋势卡片替代折线图 */
-        const trend = (data.daily_trend || []).slice(-14);
+        /* 最新事件动态 */
+        const trend = (data.recent_events || []).slice(0, 8);
         const trendGrid = document.getElementById('trendGrid');
         if (trend.length === 0) {
-          trendGrid.innerHTML = '<div class="empty">暂无趋势数据</div>';
-        } else if (trend.length <= 5) {
+          trendGrid.innerHTML = '<div class="empty">暂无最近事件数据</div>';
+        } else if (trend.length <= 4) {
           trendGrid.innerHTML = '<div class="grid" style="gap:12px;">' + trend.map(item => {
-            const day = String(item.day || item.bucket_time || '').slice(5);
-            return `<div class="metric"><div class="label">${safeText(day, '日期')}</div><div class="value" style="font-size:20px;">${fmt(item.event_count)} 事件</div><div class="hint">确认源 ${fmt(item.confirmed_sources)} / 峰值 ${fmtBps(item.peak_bps)}</div></div>`;
+            const risky = toNumber(item.confirmed_sources) + toNumber(item.suspicious_sources);
+            return `<div class="metric"><div class="label">${safeText(item.display_event_id || item.event_id, '事件')}</div><div class="value" style="font-size:18px;">${safeText(item.target_ip, '-')}</div><div class="hint">${safeText(item.severity, 'medium')} / 高风险源 ${fmt(risky)} / 峰值 ${fmtBps(item.peak_bps)}</div></div>`;
           }).join('') + '</div>';
         } else {
-          trendGrid.innerHTML = '<div style="overflow:auto;"><table class="event-table"><thead><tr><th>日期</th><th>事件数</th><th>确认源</th><th>疑似源</th><th>峰值流速</th></tr></thead><tbody>' +
+          trendGrid.innerHTML = '<div style="overflow:auto;"><table class="event-table"><thead><tr><th>事件编号</th><th>目标 IP</th><th>监测对象</th><th>严重级别</th><th>高风险源</th><th>峰值流速</th></tr></thead><tbody>' +
             trend.map(item => {
-              const day = String(item.day || item.bucket_time || '').slice(5);
-              return `<tr><td>${safeText(day)}</td><td>${fmt(item.event_count)}</td><td>${fmt(item.confirmed_sources)}</td><td>${fmt(item.suspicious_sources)}</td><td>${fmtBps(item.peak_bps)}</td></tr>`;
+              const risky = toNumber(item.confirmed_sources) + toNumber(item.suspicious_sources);
+              return `<tr><td><a href="/intel/events/${encodeURIComponent(item.event_id)}" style="color:var(--accent)">${safeText(item.display_event_id || item.event_id)}</a></td><td>${safeText(item.target_ip)}</td><td>${safeText(item.target_mo_name, '未标注')}</td><td>${safeText(item.severity, 'medium')}</td><td>${fmt(risky)}</td><td>${fmtBps(item.peak_bps)}</td></tr>`;
             }).join('') + '</tbody></table></div>';
         }
 
@@ -363,8 +366,8 @@ def build_intel_event_list_html() -> str:
     )
 
 
-def build_intel_event_detail_html(event_id: str) -> str:
-    body = """
+def build_intel_event_detail_html(event_id: str, detail: dict = None) -> str:
+    body = f"""
     <section class="grid">
       <div class="panel">
         <h2>研判结论</h2>
@@ -449,7 +452,7 @@ def build_intel_event_detail_html(event_id: str) -> str:
         </table>
       </div>
       <div style="margin-top:18px;text-align:center;">
-        <a class="link-button" id="attachmentsLink" href="#" target="_blank">查看事件附件</a>
+        <a class="link-button" id="attachmentsLink" href="/intel/events/{event_id}/attachments" target="_blank">查看事件附件</a>
       </div>
     </section>
     <section class="panel" style="margin-top:18px;">
@@ -472,10 +475,15 @@ def build_intel_event_detail_html(event_id: str) -> str:
       </div>
     </section>
     """
+    payload = json.dumps(detail or {}, ensure_ascii=False)
     script = f"""
-    fetch('/api/v1/intel/events/{event_id}')
-      .then(res => {{ if (!res.ok) throw new Error('detail fetch failed'); return res.json(); }})
-      .then(data => {{
+    (() => {{
+      const data = {payload};
+      if (!data || !data.event) {{
+        document.querySelector('.hero h1').textContent = '事件详情加载失败';
+        document.querySelector('.hero p').textContent = '未找到事件详情、ClickHouse 回流数据或 output 目录产物。';
+        return;
+      }}
         const event = data.event || {{}};
         const judgement = data.judgement || {{}};
         const impact = judgement.impact_summary || {{}};
@@ -511,7 +519,8 @@ def build_intel_event_detail_html(event_id: str) -> str:
 
         renderBarList('sourceClassBars', data.source_classes || [], 'traffic_class', 'ip_count');
         renderBarList('attackTypeBars', data.attack_type_mix || [], 'attack_type', 'ip_count', 'soft');
-        renderBarList('clusterBars', data.cluster_mix || [], 'cluster_id', 'ip_count', 'good');
+        const filteredClusterMix = (data.cluster_mix || []).filter(item => safeText(item.cluster_id, '') !== '');
+        renderBarList('clusterBars', filteredClusterMix, 'cluster_id', 'ip_count', 'good');
         renderBarList('geoBars', (data.geo_distribution || []).map(item => ({{ ...item, display: [item.src_country, item.src_province, item.src_isp].filter(Boolean).join(' / ') || '未标注' }})), 'display', 'unique_source_ips');
         renderBarList('moBars', (data.mo_distribution || []).map(item => ({{ ...item, display: item.src_mo_name || item.src_mo_code || '未标注' }})), 'display', 'attacking_source_ips', 'soft');
         renderBarList('entryBars', (data.entry_routers || []).map(item => ({{ ...item, display: [item.flow_ip_addr, item.input_if_index !== null && item.input_if_index !== undefined ? '接口 ' + item.input_if_index : ''].filter(Boolean).join(' / ') }})), 'display', 'unique_source_ips', 'good');
@@ -551,10 +560,9 @@ def build_intel_event_detail_html(event_id: str) -> str:
         }}
 
         /* 主要聚类识别 */
-        const clusterMix = data.cluster_mix || [];
         let mainCluster = '-';
-        if (clusterMix.length > 0) {{
-          const biggest = clusterMix.reduce((a, b) => toNumber(a.ip_count) > toNumber(b.ip_count) ? a : b);
+        if (filteredClusterMix.length > 0) {{
+          const biggest = filteredClusterMix.reduce((a, b) => toNumber(a.ip_count) > toNumber(b.ip_count) ? a : b);
           mainCluster = `${{safeText(biggest.cluster_id)}} (${{fmt(biggest.ip_count)}} 源)`;
         }}
 
@@ -640,10 +648,6 @@ def build_intel_event_detail_html(event_id: str) -> str:
           </tr>`;
         }}).join('') : '<tr><td colspan="6" class="empty">暂无疑似及以上攻击源</td></tr>';
 
-        /* 附件链接 */
-        const attachmentsLink = document.getElementById('attachmentsLink');
-        attachmentsLink.href = `/intel/events/${{encodeURIComponent('{event_id}')}}/attachments`;
-
         /* 高价值源对象表格 */
         document.getElementById('topSourceRows').innerHTML = topSrc.length ? topSrc.map(item => {{
           const intel = item.intel || {{}};
@@ -664,12 +668,7 @@ def build_intel_event_detail_html(event_id: str) -> str:
             <td>${{badges.join('、') || '暂无命中'}}</td>
           </tr>`;
         }}).join('') : '<tr><td colspan="6" class="empty">暂无高价值源对象</td></tr>';
-      }})
-      .catch((err) => {{
-        console.error('[THREAT_INTEL] event detail load error:', err);
-        document.querySelector('.hero h1').textContent = '事件详情加载失败';
-        document.querySelector('.hero p').textContent = '请检查事件编号、ClickHouse 数据回流和 output 目录产物。';
-      }});
+    }})();
     """
     return _intel_page(
         title="威胁情报事件详情",
@@ -681,7 +680,61 @@ def build_intel_event_detail_html(event_id: str) -> str:
     )
 
 
-def build_intel_event_attachments_html(event_id: str) -> str:
+def build_intel_event_attachments_html(event_id: str, detail: dict = None) -> str:
+    detail = detail or {}
+    event = detail.get("event") or {}
+    attachments = detail.get("attachments") or detail.get("artifacts") or []
+    images = [item for item in attachments if item.get("kind") == "image"]
+    files = [item for item in attachments if item.get("kind") != "image"]
+
+    def _text(value, fallback="-"):
+        if value is None or value == "":
+            return fallback
+        return escape(str(value))
+
+    summary_html = "".join([
+        f'<span class="chip">附件总数：{len(attachments)}</span>',
+        f'<span class="chip">图片：{len(images)}</span>',
+        f'<span class="chip">报告/表格：{len(files)}</span>',
+    ])
+
+    if images:
+        image_html = "".join(
+            f"""
+          <div class="panel" style="padding:14px;">
+            <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{_text(item.get('title') or item.get('name'))}</div>
+            <div style="border-radius:12px;overflow:hidden;background:rgba(0,0,0,0.2);">
+              <a href="{_text(item.get('url'))}" target="_blank" rel="noreferrer">
+                <img src="{_text(item.get('url'))}" alt="{_text(item.get('name'))}" style="width:100%;height:auto;display:block;cursor:pointer;" />
+              </a>
+            </div>
+            <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;">
+              <span class="hint">{_text(item.get('kind'))} / {_text(item.get('file_size'))} bytes</span>
+              <a href="{_text(item.get('url'))}" download="{_text(item.get('name'))}" class="chip" style="text-decoration:none;">下载</a>
+            </div>
+          </div>
+            """
+            for item in images
+        )
+    else:
+        image_html = '<div class="empty">暂无图片附件</div>'
+
+    if files:
+        file_rows_html = "".join(
+            f"""
+          <tr>
+            <td>{_text(item.get('title') or item.get('name'))}</td>
+            <td><span class="chip">{_text(item.get('kind'), '未知')}</span></td>
+            <td>{_text(item.get('file_size'))} bytes</td>
+            <td>{_text(item.get('created_time'))}</td>
+            <td><a href="{_text(item.get('url') or item.get('storage_uri'))}" download="{_text(item.get('name'))}" class="chip" style="text-decoration:none;cursor:pointer;">下载</a></td>
+          </tr>
+            """
+            for item in files
+        )
+    else:
+        file_rows_html = '<tr><td colspan="5" class="empty">暂无报告或表格文件</td></tr>'
+
     body = f"""
     <section class="panel">
       <h2>事件附件</h2>
@@ -689,12 +742,12 @@ def build_intel_event_attachments_html(event_id: str) -> str:
       <div style="margin-bottom:14px;">
         <a class="link-button" href="/intel/events/{event_id}" style="font-size:13px;">返回事件详情</a>
       </div>
-      <div class="chip-row" id="attachmentSummary"></div>
+      <div class="chip-row" id="attachmentSummary">{summary_html}</div>
     </section>
     <section class="panel" style="margin-top:18px;">
       <h2>图片预览</h2>
       <div class="subtle">分析过程中生成的可视化图片，点击可查看大图。</div>
-      <div class="grid two" id="imageGallery" style="margin-top:14px;"></div>
+      <div class="grid two" id="imageGallery" style="margin-top:14px;">{image_html}</div>
     </section>
     <section class="panel" style="margin-top:18px;">
       <h2>报告与数据文件</h2>
@@ -710,57 +763,23 @@ def build_intel_event_attachments_html(event_id: str) -> str:
               <th>操作</th>
             </tr>
           </thead>
-          <tbody id="fileListRows"></tbody>
+          <tbody id="fileListRows">{file_rows_html}</tbody>
         </table>
       </div>
     </section>
     """
     script = f"""
-    fetch('/api/v1/intel/events/{event_id}')
-      .then(res => {{ if (!res.ok) throw new Error('detail fetch failed'); return res.json(); }})
-      .then(data => {{
-        const event = data.event || {{}};
-        document.querySelector('.hero h1').textContent = safeText(event.event_label, '事件附件');
-        document.querySelector('.hero p').textContent =
-          `附件列表 / ${{safeText(event.display_event_id)}} / 目标 IP：${{safeText(event.target_ip)}}`;
-
-        const attachments = data.attachments || data.artifacts || [];
-        const images = attachments.filter(item => item.kind === 'image');
-        const files = attachments.filter(item => item.kind !== 'image');
-
-        document.getElementById('attachmentSummary').innerHTML = [
-          `附件总数：${{fmt(attachments.length)}}`,
-          `图片：${{fmt(images.length)}}`,
-          `报告/表格：${{fmt(files.length)}}`
-        ].map(text => `<span class="chip">${{text}}</span>`).join('');
-
-        document.getElementById('imageGallery').innerHTML = images.length ? images.map(item => `
-          <div class="panel" style="padding:14px;">
-            <div style="font-size:13px;font-weight:700;margin-bottom:8px;">${{safeText(item.title || item.name)}}</div>
-            <div style="border-radius:12px;overflow:hidden;background:rgba(0,0,0,0.2);">
-              <img src="${{safeText(item.url)}}" alt="${{safeText(item.name)}}" style="width:100%;height:auto;display:block;cursor:pointer;" onclick="window.open('${{safeText(item.url)}}', '_blank')" />
-            </div>
-            <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;">
-              <span class="hint">${{safeText(item.kind)}} / ${{fmt(item.file_size)}} bytes</span>
-              <a href="${{safeText(item.url)}}" download="${{safeText(item.name)}}" class="chip" style="text-decoration:none;">下载</a>
-            </div>
-          </div>
-        `).join('') : '<div class="empty">暂无图片附件</div>';
-
-        document.getElementById('fileListRows').innerHTML = files.length ? files.map(item => `
-          <tr>
-            <td>${{safeText(item.title || item.name)}}</td>
-            <td><span class="chip">${{safeText(item.kind, '未知')}}</span></td>
-            <td>${{fmt(item.file_size)}} bytes</td>
-            <td>${{safeText(item.created_time)}}</td>
-            <td><a href="${{safeText(item.url || item.storage_uri)}}" download="${{safeText(item.name)}}" class="chip" style="text-decoration:none;cursor:pointer;">下载</a></td>
-          </tr>
-        `).join('') : '<tr><td colspan="5" class="empty">暂无报告或表格文件</td></tr>';
-      }})
-      .catch(() => {{
+    (() => {{
+      const event = {json.dumps(event, ensure_ascii=False)};
+      if (!event || Object.keys(event).length === 0) {{
         document.querySelector('.hero h1').textContent = '附件加载失败';
-        document.querySelector('.hero p').textContent = '请检查事件编号和 ClickHouse 数据回流。';
-      }});
+        document.querySelector('.hero p').textContent = '未找到事件详情或附件数据。';
+        return;
+      }}
+      document.querySelector('.hero h1').textContent = safeText(event.event_label, '事件附件');
+      document.querySelector('.hero p').textContent =
+        `附件列表 / ${{safeText(event.display_event_id)}} / 目标 IP：${{safeText(event.target_ip)}}`;
+    }})();
     """
     return _intel_page(
         title="事件附件",

@@ -293,11 +293,17 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
 
     @app.get("/intel/events/{event_id}", response_class=HTMLResponse)
     async def intel_event_detail(event_id: str):
-        return HTMLResponse(build_intel_event_detail_html(event_id))
+        detail = threat_intel_repo.get_event_detail(event_id=event_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        return HTMLResponse(build_intel_event_detail_html(event_id, detail=detail))
 
     @app.get("/intel/events/{event_id}/attachments", response_class=HTMLResponse)
     async def intel_event_attachments_page(event_id: str):
-        return HTMLResponse(build_intel_event_attachments_html(event_id))
+        detail = threat_intel_repo.get_event_detail(event_id=event_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        return HTMLResponse(build_intel_event_attachments_html(event_id, detail=detail))
 
     @app.get("/intel/sources", response_class=HTMLResponse)
     async def intel_source_rank_page():

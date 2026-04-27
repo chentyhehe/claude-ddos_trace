@@ -328,6 +328,7 @@ class DDoSTracebackAnalyzer:
             "target_ip": target_ip,
             "target_mo_name": target_mo_name,
             "target_mo_code": target_mo_code,
+            "output_dir": output_dir,
             "start_time": start_time,
             "end_time": end_time,
             "severity": "medium",

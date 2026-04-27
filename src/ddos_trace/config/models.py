@@ -20,11 +20,11 @@
 """
 
 import os
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import yaml
+from ddos_trace._compat import dataclass, field
 
 
 @dataclass
@@ -357,6 +357,7 @@ class ThreatIntelConfig:
     """威胁情报业务表回流配置。"""
 
     enabled: bool = True
+    output_root: str = "./output"
     clickhouse_host: str = ""
     clickhouse_port: int = 0
     clickhouse_username: str = ""
@@ -487,6 +488,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
     ti = raw.get("threat_intel", {})
     threat_intel_config = ThreatIntelConfig(
         enabled=bool(ti.get("enabled", True)),
+        output_root=os.getenv("DDOS_TI_OUTPUT_ROOT", ti.get("output_root", output_config.dir)),
         clickhouse_host=os.getenv("DDOS_TI_CH_HOST", ti.get("clickhouse_host", "")),
         clickhouse_port=int(os.getenv("DDOS_TI_CH_PORT", ti.get("clickhouse_port", 0) or 0)),
         clickhouse_username=os.getenv("DDOS_TI_CH_USER", ti.get("clickhouse_username", "")),

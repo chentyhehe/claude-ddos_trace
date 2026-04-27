@@ -25,6 +25,7 @@ class ThreatIntelWriter:
         self.mysql_config = mysql_config
         self.config = threat_intel_config or ThreatIntelConfig()
         self._ch_client = None
+        self._output_root = Path(self.config.output_root or "./output").resolve()
 
     def _build_clickhouse_params(self) -> Dict[str, object]:
         return {
@@ -571,7 +572,7 @@ class ThreatIntelWriter:
                     break
             storage_uri = str(file_path.resolve())
             try:
-                rel_path = file_path.resolve().relative_to(Path.cwd().resolve() / "output").as_posix()
+                rel_path = file_path.resolve().relative_to(self._output_root).as_posix()
                 download_url = f"/artifacts/{quote(rel_path, safe='/')}"
             except ValueError:
                 download_url = ""

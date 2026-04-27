@@ -1388,7 +1388,10 @@ def build_intel_source_rank_html() -> str:
       })
       .catch(() => { document.getElementById('topSourcesRows').innerHTML = '<tr><td colspan="9" class="empty">攻击源排行加载失败</td></tr>'; });
     fetch('/api/v1/intel/clusters?limit=10').then(res => res.ok ? res.json() : { items: [] }).then(data => {
-      const clusterItems = (data.items || []).map(item => {
+      const clusterItems = (data.items || []).filter(item => {
+        const clusterId = safeText(item.cluster_id, '').trim();
+        return clusterId && clusterId !== '未聚类';
+      }).map(item => {
         const types = Array.isArray(item.attack_type_list) ? item.attack_type_list.filter(Boolean).join('、') : '';
         return { ...item, display: `${safeText(item.cluster_id)}${types ? ' (' + types + ')' : ''}` };
       });
@@ -1491,7 +1494,7 @@ def build_intel_source_profile_html(ip: str) -> str:
           ['最高置信度', fmt(data.max_confidence)],
           ['最近出现', safeText(data.last_seen)],
           ['首次出现', safeText(data.first_seen)],
-          ['关联聚类', (data.cluster_ids || []).join('、') || '无']
+          ['关联聚类', (data.cluster_ids || []).filter(item => safeText(item, '').trim()).join('、') || '无']
         ].map(item => `<div class="metric"><div class="label">${{item[0]}}</div><div class="value">${{item[1]}}</div></div>`).join('');
 
         const intel = data.intel || {{}};
