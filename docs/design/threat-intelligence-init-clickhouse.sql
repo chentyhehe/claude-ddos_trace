@@ -568,3 +568,10 @@ VALUES
     ('local_analyzer', 'internal', 90, 1, '{"description":"local analysis result ingest"}'),
     ('abuseipdb', 'api', 70, 0, '{"vendor":"AbuseIPDB"}'),
     ('alienvault_otx', 'api', 65, 0, '{"vendor":"AlienVault OTX"}');
+
+-- 2026-04-28 threat_type enhancement
+ALTER TABLE threaten_intelligence.ti_ip_profile_local on cluster cluster_zyuc
+    ADD COLUMN IF NOT EXISTS threat_types Array(String) DEFAULT [] COMMENT '威胁类型列表';
+
+ALTER TABLE threaten_intelligence.ti_ip_profile_local_dist on cluster cluster_zyuc
+    ADD COLUMN IF NOT EXISTS threat_types Array(String) DEFAULT [] COMMENT '威胁类型列表';

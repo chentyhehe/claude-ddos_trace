@@ -13,6 +13,23 @@ from ddos_trace.data.threat_intel_lookup import ThreatIntelLookup
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_THREAT_TYPE = "其他"
+THREAT_TYPE_MAX_ITEMS = 100
+THREAT_TYPE_ITEM_MAX_LENGTH = 32
+THREAT_TYPE_ENUM = (
+    "僵尸主机",
+    "扫描探测",
+    "漏洞利用",
+    "Web攻击",
+    "反射放大器",
+    "代理僵尸",
+    "Botnet控制器",
+    "钓鱼欺诈",
+    "恶意下载源",
+    "其他",
+)
+
+
 class ThreatIntelDashboardRepository:
     """威胁情报页面的数据访问层。"""
 
@@ -172,6 +189,85 @@ class ThreatIntelDashboardRepository:
     def _quote_literal(value: object) -> str:
         text = str(value or "")
         return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    @staticmethod
+    def normalize_threat_types(threat_types: Optional[Sequence[object]]) -> List[str]:
+        normalized: List[str] = []
+        for raw in threat_types or ():
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            if len(value) > THREAT_TYPE_ITEM_MAX_LENGTH:
+                raise ValueError(
+                    "threat_type item length must be <= %s" % THREAT_TYPE_ITEM_MAX_LENGTH
+                )
+            if value not in normalized:
+                normalized.append(value)
+
+        if not normalized:
+            raise ValueError("threat_type must contain at least one non-empty item")
+        if len(normalized) > THREAT_TYPE_MAX_ITEMS:
+            raise ValueError("threat_type item count must be <= %s" % THREAT_TYPE_MAX_ITEMS)
+        return normalized
+
+    @staticmethod
+    def infer_threat_types(
+        attack_types: Optional[Sequence[object]] = None,
+        reason: str = "",
+    ) -> List[str]:
+        text_parts = [str(reason or "")]
+        for item in attack_types or ():
+            value = str(item or "").strip()
+            if value:
+                text_parts.append(value)
+        haystack = " ".join(text_parts).lower()
+
+        inferred: List[str] = []
+        if any(token in haystack for token in ("cc", "http", "web", "xss", "sql", "注入")):
+            inferred.append("Web攻击")
+        if any(
+            token in haystack
+            for token in ("反射", "放大", "dns", "ntp", "ssdp", "cldap", "memcached")
+        ):
+            inferred.append("反射放大器")
+        if any(token in haystack for token in ("扫描", "探测", "scan", "probe")):
+            inferred.append("扫描探测")
+        if any(token in haystack for token in ("漏洞", "利用", "exploit", "rce")):
+            inferred.append("漏洞利用")
+        if any(token in haystack for token in ("botnet", "c2", "僵尸", "肉鸡", "ddos")):
+            inferred.append("僵尸主机")
+
+        return inferred or [DEFAULT_THREAT_TYPE]
+
+    @staticmethod
+    def _json_to_list(value) -> List[str]:
+        if isinstance(value, list):
+            items = value
+        elif isinstance(value, tuple):
+            items = list(value)
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return [text]
+            if isinstance(decoded, list):
+                items = decoded
+            elif decoded:
+                items = [decoded]
+            else:
+                return []
+        else:
+            return []
+
+        result: List[str] = []
+        for item in items:
+            text = str(item or "").strip()
+            if text and text not in result:
+                result.append(text)
+        return result
 
     def _guess_output_dir(self, event: Dict[str, object], overview: Optional[Dict[str, object]] = None) -> str:
         overview = overview or {}
@@ -1322,16 +1418,21 @@ class ThreatIntelDashboardRepository:
             "attack_types": profile.get("attack_type_list", []),
             "cluster_ids": profile.get("cluster_ids", []),
             "intel": {
-                "blacklist": intel.get("blacklist", []),
+                "blacklist": [
+                    dict(item, threat_type=self._json_to_list(item.get("threat_type")))
+                    for item in intel.get("blacklist", [])
+                ],
                 "whitelist": intel.get("whitelist", []),
                 "manual_tags": [
                     {
                         "tag_name": str(tag.get("tag_name", "")),
                         "confidence_score": tag.get("confidence_score"),
+                        "threat_type": self._json_to_list(tag.get("threat_type")),
                     }
                     for tag in intel.get("manual_tags", [])
                     if str(tag.get("tag_name", "")).strip()
                 ],
+                "threat_types": self._merge_intel_threat_types(intel),
             },
             "monthly_trend": monthly_trend,
             "recent_events": recent_events,
@@ -1351,10 +1452,14 @@ class ThreatIntelDashboardRepository:
         source_name: str = "manual",
         reason: str = "",
         created_by: str = "operator",
+        threat_types: Optional[Sequence[object]] = None,
     ) -> Dict[str, object]:
         import pymysql
 
         normalized = indicator_value.strip().lower()
+        normalized_threat_types = self.normalize_threat_types(
+            threat_types or self.infer_threat_types(reason=reason)
+        )
         conn = self._get_mysql_connection()
         try:
             with conn.cursor() as cursor:
@@ -1374,14 +1479,19 @@ class ThreatIntelDashboardRepository:
                     """
                     INSERT INTO ti_blacklist
                     (indicator_type, indicator_value, normalized_value, severity,
-                     confidence_score, source_name, reason, status, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                     confidence_score, source_name, reason, threat_type, status, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
                     """,
                     [indicator_type, indicator_value.strip(), normalized, severity,
-                     confidence_score, source_name, reason, created_by],
+                     confidence_score, source_name, reason,
+                     json.dumps(normalized_threat_types, ensure_ascii=False), created_by],
                 )
             conn.commit()
-            return {"status": "added", "indicator_value": indicator_value.strip()}
+            return {
+                "status": "added",
+                "indicator_value": indicator_value.strip(),
+                "threat_type": normalized_threat_types,
+            }
         except Exception as exc:
             logger.error("[THREAT_INTEL] 黑名单添加失败 / error[%s]", exc)
             return {"status": "error", "message": str(exc)}
@@ -1424,6 +1534,47 @@ class ThreatIntelDashboardRepository:
         finally:
             conn.close()
 
+    def update_blacklist_metadata(
+        self,
+        blacklist_id: int,
+        threat_types: Sequence[object],
+        source_name: str,
+    ) -> Dict[str, object]:
+        normalized_threat_types = self.normalize_threat_types(threat_types)
+        normalized_source_name = str(source_name or "").strip() or "manual"
+        conn = self._get_mysql_connection()
+        try:
+            with conn.cursor() as cursor:
+                affected = cursor.execute(
+                    """
+                    UPDATE ti_blacklist
+                    SET threat_type = %s,
+                        source_name = %s,
+                        updated_at = NOW()
+                    WHERE blacklist_id = %s AND status = 'active'
+                    """,
+                    [
+                        json.dumps(normalized_threat_types, ensure_ascii=False),
+                        normalized_source_name,
+                        int(blacklist_id),
+                    ],
+                )
+            conn.commit()
+            if not affected:
+                return {"status": "not_found", "affected": 0}
+            return {
+                "status": "updated",
+                "affected": int(affected),
+                "blacklist_id": int(blacklist_id),
+                "threat_type": normalized_threat_types,
+                "source_name": normalized_source_name,
+            }
+        except Exception as exc:
+            logger.error("[THREAT_INTEL] blacklist metadata update failed / error[%s]", exc)
+            return {"status": "error", "message": str(exc)}
+        finally:
+            conn.close()
+
     def get_blacklist_assets(self, status: str = "active", page: int = 1, page_size: int = 20) -> Dict[str, object]:
         try:
             total_rows = self._select_mysql(
@@ -1441,6 +1592,8 @@ class ThreatIntelDashboardRepository:
             logger.warning("[THREAT_INTEL] 黑名单查询失败 / error[%s]", exc)
             return {"total": 0, "page": page, "page_size": page_size, "items": []}
 
+        for item in items:
+            item["threat_type"] = self._json_to_list(item.get("threat_type"))
         return {"total": total, "page": page, "page_size": page_size, "items": items}
 
     def get_whitelist_assets(self, status: str = "active", page: int = 1, page_size: int = 20) -> Dict[str, object]:
@@ -1470,8 +1623,16 @@ class ThreatIntelDashboardRepository:
             offset = (page - 1) * page_size
             items = self._select_mysql(
                 """
-                SELECT tag_name, COUNT(*) AS ip_count, MAX(created_time) AS last_used
+                SELECT
+                    tag_name,
+                    COUNT(*) AS ip_count,
+                    MAX(created_time) AS last_used,
+                    GROUP_CONCAT(DISTINCT jt.threat_type_json ORDER BY jt.threat_type_json SEPARATOR '||') AS threat_type_group
                 FROM ti_manual_tag
+                LEFT JOIN JSON_TABLE(
+                    COALESCE(threat_type, JSON_ARRAY()),
+                    '$[*]' COLUMNS (threat_type_json VARCHAR(64) PATH '$')
+                ) jt ON TRUE
                 WHERE indicator_type = 'ip'
                 GROUP BY tag_name
                 ORDER BY ip_count DESC
@@ -1483,6 +1644,14 @@ class ThreatIntelDashboardRepository:
             logger.warning("[THREAT_INTEL] 标签查询失败 / error[%s]", exc)
             return {"total": 0, "page": page, "page_size": page_size, "items": []}
 
+        for item in items:
+            raw_group = str(item.get("threat_type_group", "") or "")
+            threat_types: List[str] = []
+            for chunk in raw_group.split("||"):
+                value = chunk.strip()
+                if value and value not in threat_types:
+                    threat_types.append(value)
+            item["threat_type"] = threat_types
         return {"total": total, "page": page, "page_size": page_size, "items": items}
 
     def get_feedback_assets(self, page: int = 1, page_size: int = 20) -> Dict[str, object]:
@@ -1501,6 +1670,18 @@ class ThreatIntelDashboardRepository:
 
         return {"total": total, "page": page, "page_size": page_size, "items": items}
 
+    def _merge_intel_threat_types(self, intel: Dict) -> List[str]:
+        result: List[str] = []
+        for item in intel.get("blacklist", []):
+            for threat_type in self._json_to_list(item.get("threat_type")):
+                if threat_type not in result:
+                    result.append(threat_type)
+        for item in intel.get("manual_tags", []):
+            for threat_type in self._json_to_list(item.get("threat_type")):
+                if threat_type not in result:
+                    result.append(threat_type)
+        return result
+
     # ------------------------------------------------------------------
     # 内部工具
     # ------------------------------------------------------------------
@@ -1518,11 +1699,20 @@ class ThreatIntelDashboardRepository:
                 "blacklist_hit": len(intel.get("blacklist", [])),
                 "whitelist_hit": len(intel.get("whitelist", [])),
                 "manual_tag_count": len(intel.get("manual_tags", [])),
+                "blacklist_items": [
+                    {
+                        "blacklist_id": entry.get("blacklist_id"),
+                        "source_name": str(entry.get("source_name", "")).strip(),
+                        "threat_type": self._json_to_list(entry.get("threat_type")),
+                    }
+                    for entry in intel.get("blacklist", [])
+                ],
                 "manual_tags": [
                     str(tag.get("tag_name", "")).strip()
                     for tag in intel.get("manual_tags", [])
                     if str(tag.get("tag_name", "")).strip()
                 ],
+                "threat_types": self._merge_intel_threat_types(intel),
             }
             enriched.append(item)
         return enriched
@@ -1540,7 +1730,9 @@ class ThreatIntelDashboardRepository:
                     "blacklist_hit": 0,
                     "whitelist_hit": 0,
                     "manual_tag_count": 0,
+                    "blacklist_items": [],
                     "manual_tags": [],
+                    "threat_types": [],
                 }
                 enriched.append(row)
             return enriched

@@ -1,4 +1,6 @@
 import logging
+import json
+import logging
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -53,6 +55,24 @@ class ThreatIntelLookup:
                 ips.append(ip)
         return ips
 
+    @staticmethod
+    def _extract_threat_types(entries: List[Dict]) -> List[str]:
+        result: List[str] = []
+        for item in entries or []:
+            raw_value = item.get("threat_type")
+            if isinstance(raw_value, list):
+                values = raw_value
+            else:
+                try:
+                    values = json.loads(str(raw_value or "[]"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    values = []
+            for value in values:
+                text = str(value or "").strip()
+                if text and text not in result:
+                    result.append(text)
+        return result
+
     def _query_table(self, conn, sql: str, ips: List[str]) -> List[Dict]:
         all_rows: List[Dict] = []
         with conn.cursor() as cursor:
@@ -84,7 +104,7 @@ class ThreatIntelLookup:
 
         try:
             blacklist_sql = """
-                SELECT normalized_value, severity, confidence_score, source_name, reason
+                SELECT blacklist_id, normalized_value, severity, confidence_score, source_name, reason, threat_type
                 FROM ti_blacklist
                 WHERE indicator_type = 'ip'
                   AND status = 'active'
@@ -100,7 +120,7 @@ class ThreatIntelLookup:
                   AND (effective_to IS NULL OR effective_to >= NOW())
             """
             tag_sql = """
-                SELECT normalized_value, tag_name, tag_value, confidence_score, reason
+                SELECT normalized_value, tag_name, tag_value, confidence_score, reason, threat_type
                 FROM ti_manual_tag
                 WHERE indicator_type = 'ip'
                   AND normalized_value IN ({placeholders})
@@ -132,6 +152,7 @@ class ThreatIntelLookup:
         result["ti_manual_tag_count"] = 0
         result["ti_weight_adjustment"] = 0.0
         result["ti_tags"] = ""
+        result["ti_threat_types"] = ""
 
         for src_ip, row in result.iterrows():
             ip = str(src_ip).strip()
@@ -139,6 +160,7 @@ class ThreatIntelLookup:
             blacklists = intel.get("blacklist", [])
             whitelists = intel.get("whitelist", [])
             manual_tags = intel.get("manual_tags", [])
+            threat_types = self._extract_threat_types(blacklists) + self._extract_threat_types(manual_tags)
 
             base_score = float(row.get("attack_confidence", 0) or 0)
             score = base_score
@@ -179,5 +201,6 @@ class ThreatIntelLookup:
             result.at[src_ip, "confidence_reasons"] = reasons
             result.at[src_ip, "ti_weight_adjustment"] = round(score - base_score, 2)
             result.at[src_ip, "ti_tags"] = ",".join(sorted(set(tags)))
+            result.at[src_ip, "ti_threat_types"] = ",".join(sorted(set(threat_types)))
 
         return result

@@ -477,8 +477,21 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     async def intel_asset_add_blacklist(request: dict = Body(default={})):
         indicator_type = request.get("indicator_type", "ip")
         indicator_value = request.get("indicator_value", "").strip()
+        threat_types = request.get("threat_type")
+        attack_types = request.get("attack_types")
         if not indicator_value:
             raise HTTPException(status_code=400, detail="indicator_value 不能为空")
+        try:
+            normalized_threat_types = threat_intel_repo.normalize_threat_types(
+                threat_types
+                if threat_types is not None
+                else threat_intel_repo.infer_threat_types(
+                    attack_types=attack_types,
+                    reason=str(request.get("reason", "")),
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         try:
             result = threat_intel_repo.add_to_blacklist(
                 indicator_type=indicator_type,
@@ -488,6 +501,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 source_name=request.get("source_name", "manual"),
                 reason=request.get("reason", ""),
                 created_by=request.get("created_by", "operator"),
+                threat_types=normalized_threat_types,
             )
         except Exception as exc:
             logger.error("[API] 黑名单添加失败 / error[%s]", exc)
@@ -509,6 +523,30 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"解除失败: {exc}")
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=result.get("message", "解除失败"))
+        return result
+
+    @app.post("/api/v1/intel/assets/blacklist/update")
+    async def intel_asset_update_blacklist(request: dict = Body(default={})):
+        blacklist_id = request.get("blacklist_id")
+        if not blacklist_id:
+            raise HTTPException(status_code=400, detail="blacklist_id 不能为空")
+        try:
+            normalized_threat_types = threat_intel_repo.normalize_threat_types(request.get("threat_type"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        try:
+            result = threat_intel_repo.update_blacklist_metadata(
+                blacklist_id=int(blacklist_id),
+                threat_types=normalized_threat_types,
+                source_name=str(request.get("source_name", "")).strip() or "manual",
+            )
+        except Exception as exc:
+            logger.error("[API] blacklist metadata update failed / error[%s]", exc)
+            raise HTTPException(status_code=500, detail=f"更新失败: {exc}")
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("message", "更新失败"))
+        if result.get("status") == "not_found":
+            raise HTTPException(status_code=404, detail="blacklist not found")
         return result
 
     @app.get("/api/v1/intel/assets/whitelist")

@@ -124,3 +124,10 @@ ON DUPLICATE KEY UPDATE
     enabled = VALUES(enabled),
     config_json = VALUES(config_json),
     updated_at = CURRENT_TIMESTAMP;
+
+-- 2026-04-28 threat_type enhancement
+ALTER TABLE ti_blacklist
+    ADD COLUMN  threat_type JSON NOT NULL COMMENT '威胁类型列表，JSON 数组，至少 1 个元素，单项长度不超过 32 字符';
+
+ALTER TABLE ti_manual_tag
+    ADD COLUMN  threat_type JSON NOT NULL COMMENT '威胁类型列表，JSON 数组，至少 1 个元素，单项长度不超过 32 字符';

@@ -98,3 +98,19 @@ curl -X POST "http://127.0.0.1:8000/api/v1/analyze/alert" \
   -H "Content-Type: application/json" \
   -d '{"attack_id":"ATK-20260401-001"}'
 ```
+
+安装包离线下载：
+wget -P /opt/ddos-trace/ https://www.python.org/ftp/python/3.6.8/Python-3.6.8.tgz
+
+python3.6 -m pip download \
+  -d /home/offline_wheels \
+  "dataclasses>=0.8" \
+  "pandas>=1.1.5,<1.2" \
+  "numpy>=1.19.5,<1.20" \
+  "matplotlib>=3.3.4,<3.4" \
+  "scikit-learn>=0.24.2,<1.0" \
+  "clickhouse-driver>=0.2.5,<0.2.6" \
+  "pymysql>=0.9.3,<1.1" \
+  "fastapi>=0.63.0,<0.79" \
+  "uvicorn>=0.16.0,<0.17" \
+  "pyyaml>=5.4.1,<6.0.1"

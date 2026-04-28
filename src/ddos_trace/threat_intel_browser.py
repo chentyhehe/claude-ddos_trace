@@ -1258,6 +1258,32 @@ def build_intel_source_rank_html() -> str:
         font-size:12px;font-weight:700;cursor:pointer;transition:background 160ms ease;
       }
       .btn-events:hover { background:rgba(66,232,224,0.18); }
+      .btn-secondary {
+        display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;border-radius:999px;
+        border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--ink);
+        font-size:12px;font-weight:700;cursor:pointer;
+      }
+      .intel-hit-cell { min-width: 190px; }
+      .intel-hit-badges { display:flex; flex-wrap:wrap; gap:6px; }
+      .intel-hit-badge {
+        display:inline-flex;align-items:center;white-space:nowrap;padding:4px 10px;border-radius:999px;
+        font-size:11px;font-weight:700;line-height:1.1;border:1px solid rgba(255,255,255,0.10);
+        background:rgba(255,255,255,0.05);color:var(--ink);
+      }
+      .intel-hit-badge.blacklist { color:#fecdd3; border-color:rgba(251,113,145,0.28); background:rgba(251,113,145,0.14); }
+      .intel-hit-badge.whitelist { color:#bbf7d0; border-color:rgba(34,197,94,0.28); background:rgba(34,197,94,0.14); }
+      .intel-hit-badge.tag { color:#fed7aa; border-color:rgba(249,115,22,0.24); background:rgba(249,115,22,0.12); }
+      .intel-hit-badge.threat { color:#bfdbfe; border-color:rgba(59,130,246,0.26); background:rgba(59,130,246,0.12); }
+      .field-label { display:block; font-size:12px; color:var(--muted); margin-bottom:8px; font-weight:700; }
+      .field-input {
+        width:100%;padding:10px 12px;border-radius:14px;border:1px solid var(--line);
+        background:rgba(255,255,255,0.04);color:var(--ink);margin-bottom:14px;
+      }
+      .selector-grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:8px; margin-bottom:16px; }
+      .selector-option {
+        display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;
+        border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.03);font-size:12px;
+      }
       .popup-overlay {
         position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;display:flex;align-items:center;justify-content:center;
         backdrop-filter:blur(6px);
@@ -1289,7 +1315,100 @@ def build_intel_source_rank_html() -> str:
       document.body.appendChild(overlay);
     };
 
+    const inferThreatTypes = (attackTypes) => {
+      const list = Array.isArray(attackTypes) ? attackTypes.filter(Boolean) : [];
+      const joined = list.join(' ').toLowerCase();
+      const threatTypes = [];
+      if (['cc', 'http', 'web', 'xss', 'sql', '注入'].some(token => joined.includes(token))) threatTypes.push('Web攻击');
+      if (['反射', '放大', 'dns', 'ntp', 'ssdp', 'cldap', 'memcached'].some(token => joined.includes(token))) threatTypes.push('反射放大器');
+      if (['扫描', '探测', 'scan', 'probe'].some(token => joined.includes(token))) threatTypes.push('扫描探测');
+      if (['漏洞', '利用', 'exploit', 'rce'].some(token => joined.includes(token))) threatTypes.push('漏洞利用');
+      if (['botnet', 'c2', '僵尸', '肉鸡', 'ddos'].some(token => joined.includes(token))) threatTypes.push('僵尸主机');
+      return threatTypes.length ? threatTypes : ['其他'];
+    };
+
+    const THREAT_TYPE_OPTIONS = [
+      '僵尸主机', '扫描探测', '漏洞利用', 'Web攻击', '反射放大器',
+      '代理僵尸', 'Botnet控制器', '钓鱼欺诈', '恶意下载源', '其他'
+    ];
+
+    const renderIntelHitBadges = (intel) => {
+      const badges = [];
+      if (toNumber(intel.blacklist_hit) > 0) badges.push('<span class="intel-hit-badge blacklist">黑名单</span>');
+      if (toNumber(intel.whitelist_hit) > 0) badges.push('<span class="intel-hit-badge whitelist">白名单</span>');
+      if (Array.isArray(intel.manual_tags)) intel.manual_tags.forEach(tag => badges.push(`<span class="intel-hit-badge tag">${safeText(tag)}</span>`));
+      if (Array.isArray(intel.threat_types)) intel.threat_types.forEach(tag => badges.push(`<span class="intel-hit-badge threat">${safeText(tag)}</span>`));
+      return badges.length ? `<div class="intel-hit-badges">${badges.join('')}</div>` : '-';
+    };
+
+    const openBlacklistEditor = ({ title, subtitle, defaultThreatTypes = [], defaultSourceName = 'manual', onSubmit }) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'popup-overlay';
+      overlay.innerHTML = `<div class="popup-card">
+        <button class="popup-close" type="button">&times;</button>
+        <h3>${safeText(title)}</h3>
+        <div class="subtle" style="margin-bottom:14px;">${safeText(subtitle || '')}</div>
+        <label class="field-label">情报来源</label>
+        <input id="blacklistSourceName" class="field-input" value="${safeText(defaultSourceName || 'manual')}" />
+        <label class="field-label">威胁类型（可多选）</label>
+        <div class="selector-grid">
+          ${THREAT_TYPE_OPTIONS.map(item => `<label class="selector-option"><input type="checkbox" data-threat-type value="${safeText(item)}" ${defaultThreatTypes.includes(item) ? 'checked' : ''} /><span>${safeText(item)}</span></label>`).join('')}
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button type="button" class="btn-secondary" data-close-editor>取消</button>
+          <button type="button" class="btn-blacklist" data-save-editor>保存</button>
+        </div>
+      </div>`;
+      const close = () => overlay.remove();
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+      overlay.querySelector('[data-close-editor]').addEventListener('click', close);
+      overlay.querySelector('.popup-close').addEventListener('click', close);
+      overlay.querySelector('[data-save-editor]').addEventListener('click', async () => {
+        const selectedThreatTypes = Array.from(overlay.querySelectorAll('[data-threat-type]:checked')).map(node => node.value);
+        const sourceName = (overlay.querySelector('#blacklistSourceName').value || '').trim() || 'manual';
+        if (!selectedThreatTypes.length) {
+          alert('至少选择一个威胁类型');
+          return;
+        }
+        try {
+          await onSubmit({ threatTypes: selectedThreatTypes, sourceName });
+          close();
+        } catch (err) {
+          alert(err.message || '保存失败');
+        }
+      });
+      document.body.appendChild(overlay);
+    };
+
     const addToBlacklist = async (ip, confidence, attackTypes) => {
+      const threatTypes = inferThreatTypes(attackTypes);
+      const displayTypes = Array.isArray(attackTypes) ? attackTypes.join('、') : (attackTypes || '未识别');
+      openBlacklistEditor({
+        title: `加入黑名单：${ip}`,
+        subtitle: `攻击类型：${displayTypes} / 置信度：${fmt(confidence)}`,
+        defaultThreatTypes: threatTypes,
+        defaultSourceName: 'manual',
+        onSubmit: async ({ threatTypes: selectedThreatTypes, sourceName }) => {
+          const res = await fetch('/api/v1/intel/assets/blacklist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              indicator_type: 'ip',
+              indicator_value: ip,
+              severity: confidence >= 80 ? 'high' : 'medium',
+              confidence_score: confidence,
+              source_name: sourceName,
+              attack_types: Array.isArray(attackTypes) ? attackTypes : [],
+              threat_type: selectedThreatTypes,
+              reason: `从攻击源排行加入，攻击类型：${displayTypes}，置信度：${confidence}`
+            })
+          });
+          if (!res.ok) throw new Error(await res.text());
+          alert(`${ip} 已成功加入黑名单`);
+          location.reload();
+        }
+      });
+      return;
       const types = Array.isArray(attackTypes) ? attackTypes.join('、') : (attackTypes || '未识别');
       if (!confirm(`确认将 ${ip} 加入黑名单吗？\\n\\n置信度：${fmt(confidence)}\\n攻击类型：${types}`)) return;
       try {
@@ -1302,6 +1421,8 @@ def build_intel_source_rank_html() -> str:
             severity: confidence >= 80 ? 'high' : 'medium',
             confidence_score: confidence,
             source_name: 'manual',
+            attack_types: Array.isArray(attackTypes) ? attackTypes : [],
+            threat_type: threatTypes,
             reason: `从攻击源排行加入，攻击类型：${types}，置信度：${confidence}`
           })
         });
@@ -1353,6 +1474,7 @@ def build_intel_source_rank_html() -> str:
             item.last_seen ? `last ${safeText(item.last_seen)}` : ''
           ].filter(Boolean).join('<br>');
           const alreadyBlacklisted = toNumber(intel.blacklist_hit) > 0;
+          const activeBlacklist = Array.isArray(intel.blacklist_items) && intel.blacklist_items.length ? intel.blacklist_items[0] : null;
           const eventDataAttr = encodeURIComponent(JSON.stringify(eventIds)).replace(/'/g, '&#39;');
           return `<tr class="${rowClass}">
             <td><a href="/intel/sources/${encodeURIComponent(item.src_ip)}" style="color:var(--accent);text-decoration:none;">${safeText(item.src_ip)}</a></td>
@@ -1362,7 +1484,7 @@ def build_intel_source_rank_html() -> str:
             <td>${attackTypes.join('、') || '未识别'}</td>
             <td style="font-size:12px;color:var(--muted);">${features.join('；') || '-'}</td>
             <td>${geo}</td>
-            <td>${tags.length ? tags.map(tag => `<span class="chip" style="font-size:11px;">${safeText(tag)}</span>`).join('') : '-'}</td>
+            <td class="intel-hit-cell">${renderIntelHitBadges(intel)}</td>
             <td>${alreadyBlacklisted ? '<span style="color:var(--muted);font-size:12px;">已在黑名单</span>' : `<button class="btn-blacklist" data-blacklist-ip="${safeText(item.src_ip)}" data-blacklist-confidence="${toNumber(item.max_confidence)}" data-blacklist-types='${encodeURIComponent(JSON.stringify(attackTypes))}'>加入黑名单</button>`}</td>
           </tr>`;
         }).join('') : '<tr><td colspan="9" class="empty">暂无重复攻击源</td></tr>';
@@ -1592,10 +1714,67 @@ def build_intel_asset_blacklist_html() -> str:
         border:1px solid rgba(66,232,224,0.24);background:rgba(66,232,224,0.08);color:var(--accent);
         font-size:12px;font-weight:700;cursor:pointer;
       }
+      .btn-edit {
+        display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;border-radius:999px;
+        border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:var(--ink);
+        font-size:12px;font-weight:700;cursor:pointer;margin-right:8px;
+      }
       .btn-release:hover { background:rgba(66,232,224,0.18); }
     </style>
     """
     script = """
+    const THREAT_TYPE_OPTIONS = ['僵尸主机', '扫描探测', '漏洞利用', 'Web攻击', '反射放大器', '代理僵尸', 'Botnet控制器', '钓鱼欺诈', '恶意下载源', '其他'];
+    const renderThreatBadges = (threatTypes) => {
+      const list = Array.isArray(threatTypes) ? threatTypes : [];
+      return list.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">${list.map(item => `<span class="intel-hit-badge threat">${safeText(item)}</span>`).join('')}</div>` : '<div class="subtle" style="margin-top:6px;">未设置威胁类型</div>';
+    };
+    const openBlacklistAssetEditor = (item) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'popup-overlay';
+      const selected = Array.isArray(item.threat_type) ? item.threat_type : [];
+      overlay.innerHTML = `<div class="popup-card">
+        <button class="popup-close" type="button">&times;</button>
+        <h3>编辑黑名单</h3>
+        <div class="subtle" style="margin-bottom:14px;">${safeText(item.indicator_value || '')}</div>
+        <label class="field-label">情报来源</label>
+        <input id="assetSourceName" class="field-input" value="${safeText(item.source_name || 'manual')}" />
+        <label class="field-label">威胁类型（可多选）</label>
+        <div class="selector-grid">
+          ${THREAT_TYPE_OPTIONS.map(option => `<label class="selector-option"><input type="checkbox" data-threat-type value="${safeText(option)}" ${selected.includes(option) ? 'checked' : ''} /><span>${safeText(option)}</span></label>`).join('')}
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button type="button" class="btn-secondary" data-close-editor>取消</button>
+          <button type="button" class="btn-blacklist" data-save-editor>保存</button>
+        </div>
+      </div>`;
+      const close = () => overlay.remove();
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+      overlay.querySelector('.popup-close').addEventListener('click', close);
+      overlay.querySelector('[data-close-editor]').addEventListener('click', close);
+      overlay.querySelector('[data-save-editor]').addEventListener('click', async () => {
+        const threatTypes = Array.from(overlay.querySelectorAll('[data-threat-type]:checked')).map(node => node.value);
+        const sourceName = (overlay.querySelector('#assetSourceName').value || '').trim() || 'manual';
+        if (!threatTypes.length) {
+          alert('至少选择一个威胁类型');
+          return;
+        }
+        const res = await fetch('/api/v1/intel/assets/blacklist/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            blacklist_id: item.blacklist_id,
+            source_name: sourceName,
+            threat_type: threatTypes
+          })
+        });
+        if (!res.ok) {
+          alert(await res.text());
+          return;
+        }
+        location.reload();
+      });
+      document.body.appendChild(overlay);
+    };
     const releaseBlacklist = async (item) => {
       const value = safeText(item.indicator_value);
       if (!confirm(`确认解除 ${value} 的黑名单状态吗？`)) return;
@@ -1622,7 +1801,7 @@ def build_intel_asset_blacklist_html() -> str:
         const items = data.items || [];
         document.getElementById('assetRows').innerHTML = items.length ? items.map((item, index) => `
           <tr>
-            <td>${safeText(item.indicator_value)}</td>
+            <td>${safeText(item.indicator_value)}${renderThreatBadges(item.threat_type)}</td>
             <td>${safeText(item.severity)}</td>
             <td>${fmt(item.confidence_score)}</td>
             <td>${safeText(item.source_name)}</td>
