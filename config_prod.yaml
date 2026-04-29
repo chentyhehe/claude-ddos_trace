@@ -1,0 +1,72 @@
+# DDoS 攻击溯源分析器配置文件
+
+# ClickHouse 数据库连接
+# 注意: clickhouse-driver 使用原生协议(默认端口9000), 非 HTTP 端口(8123)
+clickhouse:
+  host: "10.187.178.12"
+  port: 9000
+  username: "default"
+  password: "RO84@vx28#JL"
+  database: "uniflow_controller_clickhouse_customer"
+  table_name: "analytics_netflow_dist"
+  alert_table_name: "detect_attack_dist"
+  timeout: 300
+  chunk_size: 100000
+
+# MySQL 阈值配置数据库
+# 用于从业务系统加载攻击类型定义、监测对象和多攻击类型阈值配置
+# 数据表: system_base_attack_type, system_base_monitor_object,
+#         system_base_threshold_summary, system_base_threshold_item
+mysql:
+  host: "10.187.178.23"
+  port: 3306
+  username: "jiance"
+  password: "rtBi%okwtyj$Url6"
+  database: "uniflow_controller_mysql"
+  charset: "utf8mb4"
+  pool_size: 5
+
+# 检测阈值
+threshold:
+  pps_threshold: 500000       # 每秒包数阈值
+  bps_threshold: 20000000     # 每秒字节数阈值（约20MB/s）
+
+# 溯源分析参数
+traceback:
+  min_cluster_size: 2         # 最小聚类样本数
+  use_dynamic_baseline: true  # 是否使用动态阈值
+  max_samples_for_clustering: 100  # 聚类采样上限
+  # 异常IP排除参数（基线计算时分离攻击IP和正常IP）
+  outlier_sigma: 3.0          # σ 倍数（3=标准，2=激进）
+  outlier_method: "auto"      # auto=自动降级 / sigma=仅σ / percentile=百分位
+  outlier_top_percent: 20.0   # percentile模式下排除Top N%
+
+# API 服务
+api:
+  host: "0.0.0.0"
+  port: 8000
+
+# 攻击类型定义 CSV 降级数据源
+# MySQL 不可用时从此文件加载 47 种攻击类型的定义和匹配规则
+attack_type_csv_path: "docs/source/system_base_attack_type.csv"
+
+# 输出
+output:
+  dir: "./output"
+
+# 威胁情报业务表回流
+threat_intel:
+  enabled: true
+  clickhouse_host: "10.187.178.12"
+  clickhouse_port: 9000
+  clickhouse_username: "default"
+  clickhouse_password: "RO84@vx28#JL"
+  clickhouse_database: "threaten_intelligence"
+  clickhouse_timeout: 300
+  mysql_host: "10.187.178.23"
+  mysql_port: 3306
+  mysql_username: "jiance"
+  mysql_password: "rtBi%okwtyj$Url6"
+  mysql_database: "threaten_intelligence"
+  mysql_charset: "utf8mb4"
+  batch_size: 5000

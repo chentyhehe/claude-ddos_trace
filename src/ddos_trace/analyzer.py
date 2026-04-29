@@ -154,6 +154,8 @@ class DDoSTracebackAnalyzer:
         mysql_config: Optional[MySQLConfig] = None,
         threat_intel_config: Optional[ThreatIntelConfig] = None,
         output_dir: str = ".",
+        report_font_path: str = "",
+        report_font_dir: str = "",
         csv_path: str = "",
     ):
         """
@@ -165,6 +167,8 @@ class DDoSTracebackAnalyzer:
             clickhouse_config: ClickHouse 连接配置，None 时使用默认值
             mysql_config: MySQL 阈值配置数据库连接，None 时使用默认值
             output_dir: 报告输出目录
+            report_font_path: 报告图表字体文件路径
+            report_font_dir: 报告图表字体目录
             csv_path: 攻击类型定义 CSV 降级文件路径
         """
         self.threshold_config = threshold_config or ThresholdConfig()
@@ -173,6 +177,8 @@ class DDoSTracebackAnalyzer:
         self.mysql_config = mysql_config or MySQLConfig()
         self.threat_intel_config = threat_intel_config or ThreatIntelConfig()
         self.output_dir = output_dir
+        self.report_font_path = str(report_font_path or "").strip()
+        self.report_font_dir = str(report_font_dir or "").strip()
 
         # 初始化各流水线阶段的处理器
         # 这些模块按 Phase 0~5 顺序串联执行
@@ -189,7 +195,11 @@ class DDoSTracebackAnalyzer:
         self._detector = AnomalyDetector(self.threshold_config, self.traceback_config)  # Phase 2: 异常检测
         self._clusterer = AttackFingerprintClusterer(self.traceback_config)              # Phase 3: 聚类
         self._reconstructor = AttackPathReconstructor()                # Phase 4: 路径重构
-        self._reporter = ReportGenerator(self.output_dir)              # Phase 5: 报告生成
+        self._reporter = ReportGenerator(
+            self.output_dir,
+            font_path=self.report_font_path,
+            font_dir=self.report_font_dir,
+        )                                                             # Phase 5: 报告生成
 
         self._threat_intel_writer = ThreatIntelWriter(
             self.clickhouse_config,
@@ -1438,7 +1448,11 @@ class DDoSTracebackAnalyzer:
                           per_type_results=None, overview=None, output_dir=None):
         """Phase 5: 报告生成与导出 — 文字报告 + CSV + 雷达图 + 威胁情报 + 分项"""
         logger.info("[Phase 5] 报告生成与导出")
-        reporter = ReportGenerator(output_dir or self.output_dir)
+        reporter = ReportGenerator(
+            output_dir or self.output_dir,
+            font_path=self.report_font_path,
+            font_dir=self.report_font_dir,
+        )
         report_text = reporter.generate_text_report(
             features, cluster_report, path_analysis, effective_thresholds,
             per_type_results=per_type_results,

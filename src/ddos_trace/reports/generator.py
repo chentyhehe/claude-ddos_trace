@@ -25,6 +25,7 @@
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -40,8 +41,12 @@ class ReportGenerator:
     所有输出文件保存到 self.output_dir 目录。
     """
 
-    def __init__(self, output_dir: str = "."):
+    def __init__(self, output_dir: str = ".", font_path: str = "", font_dir: str = ""):
         self.output_dir = output_dir
+        self.font_path = str(font_path or "").strip()
+        self.font_dir = str(font_dir or "").strip()
+        self._selected_font_name = None
+        self._font_warning_emitted = False
         os.makedirs(self.output_dir, exist_ok=True)
 
     RISK_COLORS = {
@@ -71,33 +76,113 @@ class ReportGenerator:
     }
 
     @staticmethod
-    def _prepare_matplotlib():
+    def _candidate_font_names() -> List[str]:
+        return [
+            "Microsoft YaHei",
+            "SimHei",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "Source Han Sans SC",
+            "WenQuanYi Zen Hei",
+            "Arial Unicode MS",
+        ]
+
+    @staticmethod
+    def _candidate_font_filenames() -> List[str]:
+        return [
+            "msyh.ttc",
+            "msyh.ttf",
+            "simhei.ttf",
+            "SimHei.ttf",
+            "NotoSansCJK-Regular.ttc",
+            "NotoSansCJKsc-Regular.otf",
+            "NotoSansSC-Regular.ttf",
+            "SourceHanSansSC-Regular.otf",
+            "wqy-zenhei.ttc",
+            "wqy-zenhei.ttf",
+        ]
+
+    def _find_font_file(self) -> Optional[str]:
+        explicit_path = Path(self.font_path).expanduser() if self.font_path else None
+        if explicit_path and explicit_path.is_file():
+            return str(explicit_path.resolve())
+
+        search_dirs: List[Path] = []
+        if self.font_dir:
+            font_dir = Path(self.font_dir).expanduser()
+            if font_dir.is_dir():
+                search_dirs.append(font_dir)
+
+        for directory in (
+            Path("./fonts"),
+            Path("./docs/deploy/fonts"),
+            Path("/data/ddos-trace/fonts"),
+            Path("/opt/ddos-trace/fonts"),
+            Path("/usr/share/fonts"),
+            Path("/usr/local/share/fonts"),
+            Path.home() / ".fonts",
+        ):
+            if directory.is_dir():
+                search_dirs.append(directory)
+
+        seen = set()
+        candidate_filenames = set(self._candidate_font_filenames())
+        for directory in search_dirs:
+            resolved = str(directory.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            for root, _, files in os.walk(resolved):
+                for filename in files:
+                    if filename in candidate_filenames:
+                        return str(Path(root, filename).resolve())
+        return None
+
+    def _resolve_font_name(self, font_manager) -> Optional[str]:
+        if self._selected_font_name:
+            return self._selected_font_name
+
+        font_file = self._find_font_file()
+        if font_file:
+            try:
+                font_manager.fontManager.addfont(font_file)
+                font_name = font_manager.FontProperties(fname=font_file).get_name()
+                self._selected_font_name = font_name
+                logger.info("[REPORT] 使用显式字体文件: %s / font[%s]", font_file, font_name)
+                return font_name
+            except Exception as exc:
+                logger.warning("[REPORT] 字体文件加载失败，回退系统字体探测 / path[%s] / error[%s]", font_file, exc)
+
+        available_fonts = {f.name for f in font_manager.fontManager.ttflist}
+        for font_name in self._candidate_font_names():
+            if font_name in available_fonts:
+                self._selected_font_name = font_name
+                logger.info("[REPORT] 使用系统中文字体: %s", font_name)
+                return font_name
+
+        if not self._font_warning_emitted:
+            logger.warning(
+                "[REPORT] 未找到可用中文字体，PNG 图表可能出现中文乱码；可通过 output.report_font_path / output.report_font_dir 或环境变量 DDOS_OUTPUT_FONT_PATH / DDOS_OUTPUT_FONT_DIR 指定字体"
+            )
+            self._font_warning_emitted = True
+        return None
+
+    def _prepare_matplotlib(self):
         """统一 Matplotlib 配置，优先解决中文乱码和负号显示问题。"""
         import matplotlib
         matplotlib.use("Agg")
         from matplotlib import font_manager
         import matplotlib.pyplot as plt
 
-        candidate_fonts = [
-            "Microsoft YaHei",
-            "SimHei",
-            "Noto Sans CJK SC",
-            "Source Han Sans SC",
-            "WenQuanYi Zen Hei",
-            "Arial Unicode MS",
-        ]
-        available_fonts = {f.name for f in font_manager.fontManager.ttflist}
-        selected_font = None
-        for font_name in candidate_fonts:
-            if font_name in available_fonts:
-                selected_font = font_name
-                break
+        candidate_fonts = self._candidate_font_names()
+        selected_font = self._resolve_font_name(font_manager)
 
         if selected_font:
             matplotlib.rcParams["font.sans-serif"] = [selected_font] + candidate_fonts
         else:
             matplotlib.rcParams["font.sans-serif"] = candidate_fonts + ["DejaVu Sans"]
 
+        matplotlib.rcParams["font.family"] = "sans-serif"
         matplotlib.rcParams["axes.unicode_minus"] = False
         return plt
 

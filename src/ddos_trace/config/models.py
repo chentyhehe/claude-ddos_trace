@@ -350,6 +350,8 @@ class OutputConfig:
     """输出目录配置，报告和图表将保存到此目录"""
 
     dir: str = "./output"
+    report_font_path: str = ""
+    report_font_dir: str = ""
 
 
 @dataclass
@@ -483,6 +485,8 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
     ou = raw.get("output", {})
     output_config = OutputConfig(
         dir=ou.get("dir", "./output"),
+        report_font_path=os.getenv("DDOS_OUTPUT_FONT_PATH", ou.get("report_font_path", "")),
+        report_font_dir=os.getenv("DDOS_OUTPUT_FONT_DIR", ou.get("report_font_dir", "")),
     )
 
     ti = raw.get("threat_intel", {})

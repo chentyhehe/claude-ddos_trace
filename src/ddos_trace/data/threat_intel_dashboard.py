@@ -562,7 +562,7 @@ class ThreatIntelDashboardRepository:
             f"""
             SELECT
                 toDate(start_time) AS day,
-                uniqExact(s.event_id) AS event_count,
+                uniqExact(event_id) AS event_count,
                 sum(confirmed_sources) AS confirmed_sources,
                 sum(suspicious_sources) AS suspicious_sources,
                 max(peak_bps) AS peak_bps
@@ -673,7 +673,11 @@ class ThreatIntelDashboardRepository:
                 any(province) AS province,
                 any(city) AS city,
                 any(isp) AS isp,
-                any(traffic_class) AS traffic_class,
+                multiIf(
+                    sum(if(traffic_class = 'confirmed', 1, 0)) > 0, 'confirmed',
+                    sum(if(traffic_class = 'suspicious', 1, 0)) > 0, 'suspicious',
+                    'background'
+                ) AS source_traffic_class,
                 max(attack_confidence) AS max_confidence,
                 groupArray(DISTINCT best_attack_type) AS attack_type_list,
                 uniqExact(event_id) AS event_count,
@@ -686,6 +690,8 @@ class ThreatIntelDashboardRepository:
             LIMIT 10
             """
         )
+        for item in high_risk_sources:
+            item["traffic_class"] = item.pop("source_traffic_class", "")
         high_risk_sources = self._build_source_intel_safe(high_risk_sources)
 
         recent_events = safe_ch(

@@ -117,6 +117,8 @@ def _run_alert(args):
         mysql_config=config.mysql,
         threat_intel_config=config.threat_intel,
         output_dir=output_dir,
+        report_font_path=config.output.report_font_path,
+        report_font_dir=config.output.report_font_dir,
         csv_path=config.attack_type_csv_path,
     )
 
@@ -154,6 +156,8 @@ def _run_target(args):
         mysql_config=config.mysql,
         threat_intel_config=config.threat_intel,
         output_dir=output_dir,
+        report_font_path=config.output.report_font_path,
+        report_font_dir=config.output.report_font_dir,
         csv_path=config.attack_type_csv_path,
     )
 
@@ -191,6 +195,8 @@ def _run_analyze(args):
         mysql_config=config.mysql,
         threat_intel_config=config.threat_intel,
         output_dir=output_dir,
+        report_font_path=config.output.report_font_path,
+        report_font_dir=config.output.report_font_dir,
         csv_path=config.attack_type_csv_path,
     )
 

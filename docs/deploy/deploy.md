@@ -213,5 +213,5 @@ nohup python3 -m ddos_trace serve \
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/v1/analyze/alert" \
   -H "Content-Type: application/json" \
-  -d '{"attack_id":"ATK-20260401-001"}'
+  -d '{"attack_id":"2026042820191800390001"}'
 ```

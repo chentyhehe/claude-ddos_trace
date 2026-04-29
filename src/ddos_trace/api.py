@@ -258,6 +258,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         mysql_config=config.mysql,
         threat_intel_config=config.threat_intel,
         output_dir=config.output.dir,
+        report_font_path=config.output.report_font_path,
+        report_font_dir=config.output.report_font_dir,
         csv_path=config.attack_type_csv_path,
     )
     threat_intel_repo = ThreatIntelDashboardRepository(
