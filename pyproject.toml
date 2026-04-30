@@ -27,4 +27,4 @@ ddos-trace = "ddos_trace.__main__:main"
 where = ["src"]
 
 [tool.setuptools.dynamic]
-dependencies = {file = "requirements.txt"}
+dependencies = {file = "docs/deploy/requirements.txt"}

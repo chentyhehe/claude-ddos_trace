@@ -21,7 +21,7 @@ setup(
     python_requires=">=3.6",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
-    install_requires=read_requirements("requirements.txt"),
+    install_requires=read_requirements("docs/deploy/requirements.txt"),
     extras_require={
         "hdbscan": ["hdbscan>=0.8.27,<0.8.29"],
         "dev": [

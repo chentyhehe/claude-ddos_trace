@@ -211,7 +211,15 @@ nohup python3 -m ddos_trace serve \
 ## 五、调用示例
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/analyze/alert" \
+curl -X POST "http://10.187.179.6:8000/api/v1/analyze/alert" \
   -H "Content-Type: application/json" \
-  -d '{"attack_id":"2026042820191800390001"}'
+  -d '{"attack_id":"2026042718085100480002"}'
+
+##  现网源码启动
+nohup env  PYTHONPATH=src python3 -m ddos_trace serve \
+  --config /data/ddos_trace/ddos_trace-1.0.0/config.yaml \
+  --host 0.0.0.0 \
+  --port 8000 \
+  > /data/ddos_trace/ddos_trace-1.0.0/logs/ddos-trace.out 2>&1 &
 ```
+
