@@ -206,7 +206,7 @@ def build_intel_dashboard_html() -> str:
             <td>${safeText(item.target_mo_name, '未识别监测对象')}</td>
             <td><span class="status-badge ${severityClass(item.severity)}">${safeText(item.severity, 'medium')}</span></td>
             <td>${fmt(toNumber(item.confirmed_sources) + toNumber(item.suspicious_sources))}</td>
-            <td>${safeText(item.action_hint, '建议继续观察')}</td>
+            <td><div>${safeText(item.action_hint, '建议继续观察')}</div><div class="hint" style="margin-top:6px;">${safeText(item.action_basis_text, '暂无重点依据')}</div></td>
             <td><button class="chip" data-remove-event="${safeText(item.event_id)}" data-remove-label="${safeText(item.display_event_id)}">移除</button></td>
           </tr>
         `).join('') : '<tr><td colspan="7" class="empty">暂无事件数据</td></tr>';
@@ -337,7 +337,7 @@ def build_intel_event_list_html() -> str:
               <td>${Array.isArray(item.attack_types) ? item.attack_types.join('、') : safeText(item.attack_types) || '未识别'}</td>
               <td><span class="status-badge ${severityClass(item.severity)}">${safeText(item.severity, 'medium')}</span></td>
               <td>${fmt(toNumber(item.confirmed_sources) + toNumber(item.suspicious_sources))}</td>
-              <td>${safeText(item.action_hint, '建议进一步研判')}</td>
+              <td><div>${safeText(item.action_hint, '建议进一步研判')}</div><div class="hint" style="margin-top:6px;">${safeText(item.action_basis_text, '暂无重点依据')}</div></td>
             </tr>
           `).join('') : '<tr><td colspan="8" class="empty">没有匹配的事件</td></tr>';
         })

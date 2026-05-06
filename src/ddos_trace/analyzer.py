@@ -508,6 +508,154 @@ class DDoSTracebackAnalyzer:
         }
         return main_result
 
+    @staticmethod
+    def _build_feature_overview(features: pd.DataFrame, effective_thresholds: Dict[str, object]) -> Dict[str, object]:
+        if features is None or features.empty:
+            return {
+                "total_source_ips": 0,
+                "confirmed": 0,
+                "suspicious": 0,
+                "borderline": 0,
+                "background": 0,
+                "anomaly_total": 0,
+                "top_attackers": [],
+                "attack_type_count": 0,
+                "attack_type_names": [],
+                "max_pps_threshold": 0,
+                "max_bps_threshold": 0,
+            }
+
+        class_counts = features["traffic_class"].value_counts().to_dict()
+        ranked = features[features["traffic_class"].isin(["confirmed", "suspicious"])]
+        if ranked.empty:
+            ranked = features
+        sort_cols = [c for c in ["attack_confidence", "packets_per_sec", "bytes_per_sec", "total_packets"] if c in ranked.columns]
+        if sort_cols:
+            ranked = ranked.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+
+        top_attackers = []
+        for ip, row in ranked.head(10).iterrows():
+            top_attackers.append({
+                "ip": str(ip),
+                "attack_type": row.get("best_attack_type", "overall"),
+                "matched_attack_types": row.get("matched_attack_types", ""),
+                "score": round(float(row.get("attack_confidence", 0)), 1),
+                "pps": round(float(row.get("packets_per_sec", 0)), 0),
+                "bps": round(float(row.get("bytes_per_sec", 0)), 0),
+                "country": row.get("country", ""),
+                "province": row.get("province", ""),
+                "isp": row.get("isp", ""),
+            })
+
+        return {
+            "total_source_ips": len(features),
+            "confirmed": class_counts.get("confirmed", 0),
+            "suspicious": class_counts.get("suspicious", 0),
+            "borderline": class_counts.get("borderline", 0),
+            "background": class_counts.get("background", 0),
+            "anomaly_total": class_counts.get("confirmed", 0) + class_counts.get("suspicious", 0),
+            "top_attackers": top_attackers,
+            "attack_type_count": 0,
+            "attack_type_names": [],
+            "max_pps_threshold": effective_thresholds.get("pps_threshold", 0),
+            "max_bps_threshold": effective_thresholds.get("bps_threshold", 0),
+        }
+
+    def _run_overall_threshold_analysis(
+        self,
+        raw_df: pd.DataFrame,
+        attack_context: Optional["AttackContext"] = None,
+        attack_target: Optional[str] = None,
+    ) -> Dict:
+        """Fallback analysis for long windows or empty per-type results."""
+        if raw_df.empty:
+            result = {"error": "查询结果为空"}
+            if attack_context is not None:
+                result["attack_context"] = attack_context
+            return result
+
+        features = self._extract_features(raw_df)
+        if features.empty:
+            result = {"error": "查询结果为空"}
+            if attack_context is not None:
+                result["attack_context"] = attack_context
+            return result
+
+        threshold_config = ThresholdConfig(
+            pps_threshold=int(getattr(attack_context, "threshold_pps", 0) or self.threshold_config.pps_threshold),
+            bps_threshold=int(getattr(attack_context, "threshold_bps", 0) or self.threshold_config.bps_threshold),
+        )
+        baseline = TrafficBaseline(threshold_config, self.traceback_config)
+        detector = AnomalyDetector(threshold_config, self.traceback_config)
+        effective_thresholds, baseline_stats = baseline.compute(features)
+        features = detector.detect(features, baseline_stats, effective_thresholds)
+        features = self._enrich_features_with_threat_intel(features)
+
+        anomaly_sources = features[features["traffic_class"].isin(["confirmed", "suspicious"])]
+        cluster_report = self._cluster_fingerprints(anomaly_sources)
+        path_analysis = self._reconstruct_path(raw_df, features)
+        overview = self._build_feature_overview(features, effective_thresholds)
+
+        target_ips = getattr(attack_context, "target_ips", None) or None
+        attack_id = str(getattr(attack_context, "attack_id", "") or "")
+        resolved_target = attack_target or getattr(attack_context, "attack_target", "") or (target_ips[0] if target_ips else "")
+        run_output_dir = self._resolve_run_output_dir(
+            attack_id=attack_id or None,
+            target_ips=target_ips,
+            attack_target=resolved_target or None,
+        )
+        file_tag = _build_file_tag(
+            attack_id=attack_id or None,
+            target_ips=target_ips or ([resolved_target] if resolved_target else None),
+        )
+        report = self._generate_reports(
+            features,
+            cluster_report,
+            path_analysis,
+            effective_thresholds,
+            file_tag,
+            raw_df=raw_df,
+            per_type_results=None,
+            overview=overview,
+            output_dir=run_output_dir,
+        )
+        self._sync_threat_intel(
+            event_meta=self._build_event_meta(
+                event_id=attack_id or os.path.basename(run_output_dir),
+                attack_id=attack_id,
+                attack_context=attack_context,
+                raw_df=raw_df,
+                output_dir=run_output_dir,
+                attack_target=resolved_target,
+            ),
+            overview=overview,
+            features=features,
+            cluster_report=cluster_report,
+            path_analysis=path_analysis,
+            per_type_results=None,
+        )
+
+        traffic_classification = features[["traffic_class", "attack_confidence", "confidence_reasons"]].copy()
+        slim_features = features[["traffic_class", "attack_confidence"]].copy()
+        result = {
+            "overview": overview,
+            "features": slim_features,
+            "traffic_classification": traffic_classification,
+            "anomaly_sources": anomaly_sources,
+            "clusters": cluster_report,
+            "path_analysis": path_analysis,
+            "effective_thresholds": effective_thresholds,
+            "baseline_stats": baseline_stats,
+            "report": report,
+            "output_dir": run_output_dir,
+        }
+        if attack_context is not None:
+            result["attack_context"] = attack_context
+
+        del features
+        gc.collect()
+        return result
+
     # ------------------------------------------------------------------
     # 入口1: 基于告警 ID 分析（推荐）
     # ------------------------------------------------------------------
@@ -587,6 +735,20 @@ class DDoSTracebackAnalyzer:
         # 6. 聚合分项结果为统一视图（向后兼容 + 报告生成）
         agg_features, agg_clusters, agg_path, agg_thresholds = \
             self._aggregate_per_type_results(per_type_results)
+        if not per_type_results or agg_features.empty:
+            duration = None
+            if ctx.start_time and ctx.end_time:
+                duration = ctx.end_time - ctx.start_time
+            logger.warning(
+                "[ALERT] 分攻击类型分析结果为空，回退整体阈值分析 / attack_id[%s] / duration[%s]",
+                attack_id,
+                duration,
+            )
+            return self._run_overall_threshold_analysis(
+                raw_df=raw_df,
+                attack_context=ctx,
+                attack_target=ctx.attack_target,
+            )
 
         # 7. 报告生成（用 attack_id 标识输出文件）
         run_output_dir = self._resolve_run_output_dir(

@@ -174,6 +174,27 @@ class ThreatIntelDashboardRepository:
             return default
 
     @staticmethod
+    def _downsample_rows(rows: Iterable[Dict], max_points: int = 96) -> List[Dict]:
+        items = list(rows)
+        if len(items) <= max_points or max_points <= 1:
+            return items
+
+        last_index = len(items) - 1
+        step = float(last_index) / float(max_points - 1)
+        sampled: List[Dict] = []
+        used = set()
+        for index in range(max_points):
+            source_index = int(round(index * step))
+            if source_index in used:
+                continue
+            used.add(source_index)
+            sampled.append(items[source_index])
+
+        sampled[0] = items[0]
+        sampled[-1] = items[-1]
+        return sampled
+
+    @staticmethod
     def _parse_json_object(value) -> Dict[str, object]:
         if isinstance(value, dict):
             return value
@@ -513,6 +534,31 @@ class ThreatIntelDashboardRepository:
         total_sources = self._safe_float(event.get("total_source_ips"))
         return severity * 30 + confirmed * 5 + suspicious * 2 + peak_bps / 1_000_000 + total_sources * 0.2
 
+    def _build_action_basis(self, event: Dict) -> List[str]:
+        confirmed = self._safe_int(event.get("confirmed_sources"))
+        suspicious = self._safe_int(event.get("suspicious_sources"))
+        severity = str(event.get("severity", "medium")).lower()
+        peak_bps = self._safe_float(event.get("peak_bps"))
+        total_sources = self._safe_int(event.get("total_source_ips"))
+
+        reasons: List[str] = []
+        if confirmed > 0:
+            reasons.append("存在确认攻击源")
+        if suspicious > 0:
+            reasons.append("存在疑似攻击源")
+        if severity in {"critical", "high"}:
+            reasons.append("事件严重级别较高")
+        if peak_bps >= 1_000_000_000:
+            reasons.append("峰值流速达到 Gbps 级")
+        elif peak_bps >= 200_000_000:
+            reasons.append("峰值流速明显偏高")
+        if total_sources >= 100:
+            reasons.append("来源规模较大")
+        return reasons
+
+    def _should_focus_event(self, event: Dict) -> bool:
+        return bool(self._build_action_basis(event))
+
     def _build_action_hint(self, event: Dict) -> str:
         confirmed = self._safe_float(event.get("confirmed_sources"))
         suspicious = self._safe_float(event.get("suspicious_sources"))
@@ -522,6 +568,8 @@ class ThreatIntelDashboardRepository:
             return "优先联动清洗与骨干侧排查"
         if confirmed >= 5 or suspicious >= 20:
             return "建议限速并持续追踪来源聚类"
+        if self._should_focus_event(event):
+            return "建议重点观察并复核客户侧影响"
         return "建议保持观察并结合情报标签复核"
 
     def get_dashboard(self, recent_limit: int = 12) -> Dict[str, object]:
@@ -720,7 +768,14 @@ class ThreatIntelDashboardRepository:
             item.update(self._decorate_event(item))
             item["priority_score"] = round(self._event_priority_score(item), 2)
             item["action_hint"] = self._build_action_hint(item)
-        priority_events = sorted(recent_events, key=self._event_priority_score, reverse=True)[:6]
+            item["action_basis"] = self._build_action_basis(item)
+            item["action_basis_text"] = "；".join(item["action_basis"]) or "仅作为最近事件回看"
+            item["is_focus_event"] = self._should_focus_event(item)
+        priority_events = sorted(
+            [item for item in recent_events if item.get("is_focus_event")],
+            key=self._event_priority_score,
+            reverse=True,
+        )[:6]
 
         mysql_summary = {
             "blacklist_active": self._safe_mysql_count(
@@ -919,6 +974,7 @@ class ThreatIntelDashboardRepository:
             """,
             {"event_id": event_id},
         )
+        time_distribution = self._downsample_rows(time_distribution, max_points=96)
 
         entry_routers = self._select_clickhouse(
             f"""
@@ -996,6 +1052,12 @@ class ThreatIntelDashboardRepository:
             findings.append(f"高风险源中有 {manual_tag_hits} 个命中人工标签，可优先纳入研判。")
         if whitelist_hits:
             findings.append(f"同时存在 {whitelist_hits} 个白名单命中源，处置时应避免误伤。")
+        if risky_total == 0:
+            fallback_basis = self._build_action_basis(event)
+            if fallback_basis:
+                findings.append(
+                    "当前暂无 confirmed/suspicious 高风险源，重点性主要来自 " + "、".join(fallback_basis) + "。"
+                )
 
         return {
             "recommendation": recommendation,
@@ -1129,6 +1191,8 @@ class ThreatIntelDashboardRepository:
         # 补充 action_hint
         for item in items:
             item["action_hint"] = self._build_action_hint(item)
+            item["action_basis"] = self._build_action_basis(item)
+            item["action_basis_text"] = "；".join(item["action_basis"]) or "暂无重点证据"
 
         return {
             "total": total,
@@ -1310,16 +1374,24 @@ class ThreatIntelDashboardRepository:
         db = self.config.clickhouse_database
 
         # 基本画像
-        profile_rows = self._select_clickhouse(
-            f"""
-            SELECT *
-            FROM {db}.{profile_table}
-            WHERE ip = %(ip)s
-            ORDER BY updated_time DESC
-            LIMIT 1
-            """,
-            {"ip": ip},
-        )
+        try:
+            profile_rows = self._select_clickhouse(
+                f"""
+                SELECT *
+                FROM {db}.{profile_table}
+                WHERE ip = %(ip)s
+                ORDER BY updated_time DESC
+                LIMIT 1
+                """,
+                {"ip": ip},
+            )
+        except Exception as exc:
+            logger.warning(
+                "[THREAT_INTEL] 源IP画像表查询失败，回退 source_ip 聚合 / ip[%s] / error[%s]",
+                ip,
+                exc,
+            )
+            profile_rows = []
 
         # 如果 profile 表没有，从 source_ip 表聚合
         if not profile_rows:

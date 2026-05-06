@@ -26,9 +26,11 @@ import logging
 import os
 import uuid
 from datetime import datetime
+from functools import partial
 from typing import Dict, List, Optional
 
 import pandas as pd
+from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -276,11 +278,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
 
     @app.get("/reports", response_class=HTMLResponse)
     async def reports_index():
-        return HTMLResponse(build_report_index_html(config.output.dir))
+        page = await run_in_threadpool(build_report_index_html, config.output.dir)
+        return HTMLResponse(page)
 
     @app.get("/reports/{run_name:path}", response_class=HTMLResponse)
     async def reports_detail(run_name: str):
-        page = build_report_detail_html(config.output.dir, run_name)
+        page = await run_in_threadpool(build_report_detail_html, config.output.dir, run_name)
         if page is None:
             raise HTTPException(status_code=404, detail="report not found")
         return HTMLResponse(page)
@@ -295,17 +298,19 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
 
     @app.get("/intel/events/{event_id}", response_class=HTMLResponse)
     async def intel_event_detail(event_id: str):
-        detail = threat_intel_repo.get_event_detail(event_id=event_id)
+        detail = await run_in_threadpool(threat_intel_repo.get_event_detail, event_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="event not found")
-        return HTMLResponse(build_intel_event_detail_html(event_id, detail=detail))
+        page = await run_in_threadpool(build_intel_event_detail_html, event_id, detail)
+        return HTMLResponse(page)
 
     @app.get("/intel/events/{event_id}/attachments", response_class=HTMLResponse)
     async def intel_event_attachments_page(event_id: str):
-        detail = threat_intel_repo.get_event_detail(event_id=event_id)
+        detail = await run_in_threadpool(threat_intel_repo.get_event_detail, event_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="event not found")
-        return HTMLResponse(build_intel_event_attachments_html(event_id, detail=detail))
+        page = await run_in_threadpool(build_intel_event_attachments_html, event_id, detail)
+        return HTMLResponse(page)
 
     @app.get("/intel/sources", response_class=HTMLResponse)
     async def intel_source_rank_page():
@@ -334,7 +339,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/api/v1/intel/dashboard")
     async def intel_dashboard_api():
         try:
-            return threat_intel_repo.get_dashboard()
+            return await run_in_threadpool(threat_intel_repo.get_dashboard)
         except Exception as exc:
             logger.error("[API] 威胁情报看板查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"威胁情报看板查询失败: {exc}")
@@ -342,7 +347,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/api/v1/intel/events")
     async def intel_events_api(limit: int = Query(50, ge=1, le=200)):
         try:
-            return {"items": threat_intel_repo.list_events(limit=limit)}
+            items = await run_in_threadpool(threat_intel_repo.list_events, limit)
+            return {"items": items}
         except Exception as exc:
             logger.error("[API] 威胁情报事件列表查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"威胁情报事件列表查询失败: {exc}")
@@ -350,7 +356,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/api/v1/intel/events/{event_id}")
     async def intel_event_detail_api(event_id: str):
         try:
-            detail = threat_intel_repo.get_event_detail(event_id=event_id)
+            detail = await run_in_threadpool(threat_intel_repo.get_event_detail, event_id)
         except Exception as exc:
             logger.error("[API] 威胁情报事件详情查询失败 / event_id[%s] / error[%s]", event_id, exc)
             raise HTTPException(status_code=500, detail=f"威胁情报事件详情查询失败: {exc}")
@@ -365,7 +371,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.delete("/api/v1/intel/events/{event_id}")
     async def intel_event_delete_api(event_id: str):
         try:
-            result = threat_intel_repo.delete_event_result(event_id=event_id)
+            result = await run_in_threadpool(threat_intel_repo.delete_event_result, event_id)
         except Exception as exc:
             logger.error("[API] 删除威胁情报事件失败 / event_id[%s] / error[%s]", event_id, exc)
             raise HTTPException(status_code=500, detail=f"删除事件失败: {exc}")
@@ -388,18 +394,21 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         page_size: int = Query(20, ge=1, le=100),
     ):
         try:
-            return threat_intel_repo.list_events_filtered(
-                severity=severity,
-                attack_type=attack_type,
-                target_ip=target_ip,
-                target_mo=target_mo,
-                time_range=time_range,
-                start_time=start_time,
-                end_time=end_time,
-                sort_by=sort_by,
-                sort_order=sort_order,
-                page=page,
-                page_size=page_size,
+            return await run_in_threadpool(
+                partial(
+                    threat_intel_repo.list_events_filtered,
+                    severity=severity,
+                    attack_type=attack_type,
+                    target_ip=target_ip,
+                    target_mo=target_mo,
+                    time_range=time_range,
+                    start_time=start_time,
+                    end_time=end_time,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                    page=page,
+                    page_size=page_size,
+                )
             )
         except Exception as exc:
             logger.error("[API] 威胁情报事件筛选查询失败 / error[%s]", exc)
@@ -415,7 +424,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         min_events: int = Query(2, ge=1),
     ):
         try:
-            return threat_intel_repo.get_top_repeat_sources(limit=limit, min_events=min_events)
+            return await run_in_threadpool(threat_intel_repo.get_top_repeat_sources, limit, min_events)
         except Exception as exc:
             logger.error("[API] 攻击源排行查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -423,7 +432,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/api/v1/intel/clusters")
     async def intel_clusters_api(limit: int = Query(20, ge=1, le=100)):
         try:
-            return {"items": threat_intel_repo.get_active_clusters(limit=limit)}
+            items = await run_in_threadpool(threat_intel_repo.get_active_clusters, limit)
+            return {"items": items}
         except Exception as exc:
             logger.error("[API] 团伙聚类查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -431,7 +441,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/api/v1/intel/geo_rank")
     async def intel_geo_rank_api(limit: int = Query(20, ge=1, le=100)):
         try:
-            return {"items": threat_intel_repo.get_geo_rank(limit=limit)}
+            items = await run_in_threadpool(threat_intel_repo.get_geo_rank, limit)
+            return {"items": items}
         except Exception as exc:
             logger.error("[API] 地域排行查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -439,7 +450,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/api/v1/intel/prefix_clusters")
     async def intel_prefix_clusters_api(limit: int = Query(20, ge=1, le=100)):
         try:
-            return {"items": threat_intel_repo.get_prefix_clusters(limit=limit)}
+            items = await run_in_threadpool(threat_intel_repo.get_prefix_clusters, limit)
+            return {"items": items}
         except Exception as exc:
             logger.error("[API] 网段聚类查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -451,7 +463,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/api/v1/intel/source_profile/{ip}")
     async def intel_source_profile_api(ip: str):
         try:
-            profile = threat_intel_repo.get_source_profile(ip=ip)
+            profile = await run_in_threadpool(threat_intel_repo.get_source_profile, ip)
         except Exception as exc:
             logger.error("[API] 源IP画像查询失败 / ip[%s] / error[%s]", ip, exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -470,7 +482,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         page_size: int = Query(20, ge=1, le=100),
     ):
         try:
-            return threat_intel_repo.get_blacklist_assets(status=status, page=page, page_size=page_size)
+            return await run_in_threadpool(
+                partial(threat_intel_repo.get_blacklist_assets, status=status, page=page, page_size=page_size)
+            )
         except Exception as exc:
             logger.error("[API] 黑名单查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -484,26 +498,30 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if not indicator_value:
             raise HTTPException(status_code=400, detail="indicator_value 不能为空")
         try:
-            normalized_threat_types = threat_intel_repo.normalize_threat_types(
+            normalized_threat_types = await run_in_threadpool(
+                threat_intel_repo.normalize_threat_types,
                 threat_types
                 if threat_types is not None
                 else threat_intel_repo.infer_threat_types(
                     attack_types=attack_types,
                     reason=str(request.get("reason", "")),
-                )
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         try:
-            result = threat_intel_repo.add_to_blacklist(
-                indicator_type=indicator_type,
-                indicator_value=indicator_value,
-                severity=request.get("severity", "high"),
-                confidence_score=float(request.get("confidence_score", 80.0)),
-                source_name=request.get("source_name", "manual"),
-                reason=request.get("reason", ""),
-                created_by=request.get("created_by", "operator"),
-                threat_types=normalized_threat_types,
+            result = await run_in_threadpool(
+                partial(
+                    threat_intel_repo.add_to_blacklist,
+                    indicator_type=indicator_type,
+                    indicator_value=indicator_value,
+                    severity=request.get("severity", "high"),
+                    confidence_score=float(request.get("confidence_score", 80.0)),
+                    source_name=request.get("source_name", "manual"),
+                    reason=request.get("reason", ""),
+                    created_by=request.get("created_by", "operator"),
+                    threat_types=normalized_threat_types,
+                )
             )
         except Exception as exc:
             logger.error("[API] 黑名单添加失败 / error[%s]", exc)
@@ -515,10 +533,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.post("/api/v1/intel/assets/blacklist/deactivate")
     async def intel_asset_deactivate_blacklist(request: dict = Body(default={})):
         try:
-            result = threat_intel_repo.deactivate_blacklist(
-                indicator_type=request.get("indicator_type", "ip"),
-                indicator_value=str(request.get("indicator_value", "")).strip(),
-                blacklist_id=request.get("blacklist_id"),
+            result = await run_in_threadpool(
+                partial(
+                    threat_intel_repo.deactivate_blacklist,
+                    indicator_type=request.get("indicator_type", "ip"),
+                    indicator_value=str(request.get("indicator_value", "")).strip(),
+                    blacklist_id=request.get("blacklist_id"),
+                )
             )
         except Exception as exc:
             logger.error("[API] 黑名单解除失败 / error[%s]", exc)
@@ -533,14 +554,20 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if not blacklist_id:
             raise HTTPException(status_code=400, detail="blacklist_id 不能为空")
         try:
-            normalized_threat_types = threat_intel_repo.normalize_threat_types(request.get("threat_type"))
+            normalized_threat_types = await run_in_threadpool(
+                threat_intel_repo.normalize_threat_types,
+                request.get("threat_type"),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         try:
-            result = threat_intel_repo.update_blacklist_metadata(
-                blacklist_id=int(blacklist_id),
-                threat_types=normalized_threat_types,
-                source_name=str(request.get("source_name", "")).strip() or "manual",
+            result = await run_in_threadpool(
+                partial(
+                    threat_intel_repo.update_blacklist_metadata,
+                    blacklist_id=int(blacklist_id),
+                    threat_types=normalized_threat_types,
+                    source_name=str(request.get("source_name", "")).strip() or "manual",
+                )
             )
         except Exception as exc:
             logger.error("[API] blacklist metadata update failed / error[%s]", exc)
@@ -558,7 +585,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         page_size: int = Query(20, ge=1, le=100),
     ):
         try:
-            return threat_intel_repo.get_whitelist_assets(status=status, page=page, page_size=page_size)
+            return await run_in_threadpool(
+                partial(threat_intel_repo.get_whitelist_assets, status=status, page=page, page_size=page_size)
+            )
         except Exception as exc:
             logger.error("[API] 白名单查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -569,7 +598,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         page_size: int = Query(20, ge=1, le=100),
     ):
         try:
-            return threat_intel_repo.get_tags_assets(page=page, page_size=page_size)
+            return await run_in_threadpool(
+                partial(threat_intel_repo.get_tags_assets, page=page, page_size=page_size)
+            )
         except Exception as exc:
             logger.error("[API] 标签查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -580,7 +611,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         page_size: int = Query(20, ge=1, le=100),
     ):
         try:
-            return threat_intel_repo.get_feedback_assets(page=page, page_size=page_size)
+            return await run_in_threadpool(
+                partial(threat_intel_repo.get_feedback_assets, page=page, page_size=page_size)
+            )
         except Exception as exc:
             logger.error("[API] 反馈查询失败 / error[%s]", exc)
             raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
@@ -601,7 +634,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         task_id = uuid.uuid4().hex[:12]
 
         try:
-            result = analyzer.run_analysis_by_alert(attack_id=req.attack_id)
+            result = await run_in_threadpool(analyzer.run_analysis_by_alert, req.attack_id)
         except Exception as e:
             logger.error("[API] 分析失败 / task_id[%s] / error[%s]", task_id, e)
             raise HTTPException(status_code=500, detail=f"分析失败: {e}")
@@ -632,10 +665,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         end = _parse_optional_time(req.end_time)
 
         try:
-            result = analyzer.run_analysis_by_target(
-                attack_target=req.attack_target,
-                start_time=start,
-                end_time=end,
+            result = await run_in_threadpool(
+                partial(
+                    analyzer.run_analysis_by_target,
+                    attack_target=req.attack_target,
+                    start_time=start,
+                    end_time=end,
+                )
             )
         except Exception as e:
             logger.error("[API] 分析失败 / task_id[%s] / error[%s]", task_id, e)
@@ -670,11 +706,14 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"时间格式错误: {e}")
 
         try:
-            result = analyzer.run_full_analysis(
-                target_ips=req.target_ips,
-                target_mo_codes=req.target_mo_codes,
-                start_time=start,
-                end_time=end,
+            result = await run_in_threadpool(
+                partial(
+                    analyzer.run_full_analysis,
+                    target_ips=req.target_ips,
+                    target_mo_codes=req.target_mo_codes,
+                    start_time=start,
+                    end_time=end,
+                )
             )
         except Exception as e:
             logger.error("[API] 分析失败 / task_id[%s] / error[%s]", task_id, e)

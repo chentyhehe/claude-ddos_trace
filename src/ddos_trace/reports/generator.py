@@ -1881,7 +1881,15 @@ class ReportGenerator:
             anomaly_raw = raw_df[raw_df["src_ip_addr"].isin(anomaly_ips)].copy()
 
             if not anomaly_raw.empty and "flow_time" in anomaly_raw.columns:
-                anomaly_raw["hour"] = anomaly_raw["flow_time"].dt.floor("h")
+                bucket_freq = "h"
+                if "hour" in timeline.columns:
+                    bucket_times = pd.to_datetime(timeline["hour"], errors="coerce").dropna().sort_values()
+                    if len(bucket_times) >= 2:
+                        bucket_diffs = bucket_times.diff().dropna()
+                        if not bucket_diffs.empty:
+                            bucket_freq = bucket_diffs.min()
+
+                anomaly_raw["hour"] = anomaly_raw["flow_time"].dt.floor(bucket_freq)
 
                 # 每个时段的 Top 攻击源（按包数最大的 IP）
                 top_sources = (

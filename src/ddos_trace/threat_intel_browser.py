@@ -1,3 +1,6 @@
+from urllib.parse import quote
+
+
 def build_intel_dashboard_html() -> str:
     return """<!doctype html>
 <html lang="zh-CN">
@@ -404,7 +407,7 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
       position: absolute;
       border-radius: 999px;
       pointer-events: none;
-      filter: blur(24px);
+      filter: blur(10px);
       opacity: 0.7;
     }}
     .shell::before {{
@@ -422,14 +425,14 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
       background: radial-gradient(circle, rgba(91, 140, 255, 0.22), transparent 72%);
     }}
     .topbar {{
-      position: sticky;
-      top: 18px;
+      position: relative;
+      top: auto;
       z-index: 5;
       display: flex; align-items: center; justify-content: space-between; gap: 16px;
       padding: 18px 22px; margin-bottom: 20px; border-radius: var(--radius-xl);
       background: linear-gradient(135deg, rgba(9, 20, 38, 0.9), rgba(14, 32, 58, 0.82));
       border: 1px solid var(--line);
-      backdrop-filter: blur(20px);
+      backdrop-filter: none;
       box-shadow: var(--shadow-outer), var(--shadow-inner);
     }}
     .brand {{
@@ -498,7 +501,7 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
       height: 320px;
       border-radius: 50%;
       background: radial-gradient(circle, rgba(91, 140, 255, 0.26), transparent 70%);
-      filter: blur(6px);
+      filter: blur(2px);
     }}
     .hero::after {{
       content: "";
@@ -744,6 +747,21 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
         return `<div class="bar-item"><div class="bar-head"><span>${{label}}</span><strong>${{fmt(value)}}</strong></div><div class="bar-track"><div class="bar-fill ${{fillClass}}" style="width:${{width}}%"></div></div></div>`;
       }}).join('');
     }};
+    const compactPoints = (points, maxPoints = 60) => {{
+      if (!Array.isArray(points) || points.length <= maxPoints || maxPoints <= 1) return points || [];
+      const step = (points.length - 1) / (maxPoints - 1);
+      const sampled = [];
+      const used = new Set();
+      for (let index = 0; index < maxPoints; index += 1) {{
+        const sourceIndex = Math.round(index * step);
+        if (used.has(sourceIndex)) continue;
+        used.add(sourceIndex);
+        sampled.push(points[sourceIndex]);
+      }}
+      sampled[0] = points[0];
+      sampled[sampled.length - 1] = points[points.length - 1];
+      return sampled;
+    }};
     const renderLineChart = (target, points, series) => {{
       const el = document.getElementById(target);
       if (!el) return;
@@ -751,10 +769,11 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
         el.innerHTML = '<div class="empty">暂无趋势数据</div>';
         return;
       }}
+      const sampledPoints = compactPoints(points, 60);
       const width = 780, height = 240, padL = 50, padR = 24, padT = 28, padB = 28;
       const chartW = width - padL - padR, chartH = height - padT - padB;
-      const step = points.length === 1 ? 0 : chartW / (points.length - 1);
-      const globalMax = Math.max(...series.map(s => Math.max(...points.map(p => toNumber(p[s.key])), 1)));
+      const step = sampledPoints.length === 1 ? 0 : chartW / (sampledPoints.length - 1);
+      const globalMax = Math.max(...series.map(s => Math.max(...sampledPoints.map(p => toNumber(p[s.key])), 1)));
       const yTicks = 4;
       const yLabels = Array.from({{length: yTicks + 1}}, (_, i) => {{
         const val = Math.round(globalMax * (1 - i / yTicks));
@@ -762,25 +781,27 @@ def _intel_page(title: str, active: str, hero_title: str, hero_subtitle: str, bo
         return `<text x="${{padL - 6}}" y="${{y + 4}}" font-size="9" text-anchor="end" fill="#7690b0">${{fmt(val)}}</text><line x1="${{padL}}" y1="${{y}}" x2="${{width - padR}}" y2="${{y}}" stroke="rgba(125,173,255,0.06)" stroke-width="1"/>`;
       }}).join('');
       const lines = series.map(item => {{
-        const maxValue = Math.max(...points.map(point => toNumber(point[item.key])), 1);
-        const path = points.map((point, index) => {{
+        const maxValue = Math.max(...sampledPoints.map(point => toNumber(point[item.key])), 1);
+        const path = sampledPoints.map((point, index) => {{
           const x = padL + step * index;
           const y = padT + chartH - (toNumber(point[item.key]) / maxValue) * chartH;
           return `${{index === 0 ? 'M' : 'L'}} ${{x}} ${{y}}`;
         }}).join(' ');
         return `<path d="${{path}}" fill="none" stroke="${{item.color}}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>`;
       }}).join('');
-      const dots = series.map(item => {{
-        const maxValue = Math.max(...points.map(point => toNumber(point[item.key])), 1);
-        return points.map((point, index) => {{
+      const dots = sampledPoints.length > 64 ? '' : series.map(item => {{
+        const maxValue = Math.max(...sampledPoints.map(point => toNumber(point[item.key])), 1);
+        return sampledPoints.map((point, index) => {{
           const x = padL + step * index;
           const y = padT + chartH - (toNumber(point[item.key]) / maxValue) * chartH;
           return `<circle cx="${{x}}" cy="${{y}}" r="3" fill="${{item.color}}" opacity="0.7"><title>${{safeText(item.label)}}: ${{fmt(toNumber(point[item.key]))}}</title></circle>`;
         }}).join('');
       }}).join('');
-      const labels = points.map((point, index) => {{
+      const labelStep = Math.max(1, Math.ceil(sampledPoints.length / 8));
+      const labels = sampledPoints.map((point, index) => {{
+        if (index !== 0 && index !== sampledPoints.length - 1 && index % labelStep !== 0) return '';
         const x = padL + step * index;
-        const raw = point.day || point.bucket_time || point.month || '';
+        const raw = point.day || point.bucket_time || point.hour || point.month || '';
         const text = String(raw).slice(5, 10) || String(raw);
         return `<text x="${{x}}" y="${{height - 6}}" font-size="10" text-anchor="middle" fill="#7690b0">${{text}}</text>`;
       }}).join('');
@@ -1564,6 +1585,7 @@ def build_intel_source_rank_html() -> str:
 
 
 def build_intel_source_profile_html(ip: str) -> str:
+    encoded_ip = quote(ip, safe="")
     body = """
     <section class="grid">
       <div class="panel">
@@ -1604,7 +1626,7 @@ def build_intel_source_profile_html(ip: str) -> str:
     </section>
     """
     script = f"""
-    fetch('/api/v1/intel/source_profile/{ip}')
+    fetch('/api/v1/intel/source_profile/{encoded_ip}')
       .then(res => {{ if (!res.ok) throw new Error('source profile fetch failed'); return res.json(); }})
       .then(data => {{
         document.querySelector('.hero h1').textContent = `攻击源画像：${{safeText(data.ip)}}`;
@@ -1635,12 +1657,12 @@ def build_intel_source_profile_html(ip: str) -> str:
 
         const events = data.recent_events || [];
         document.getElementById('profileEvents').innerHTML = events.length ? events.map(item => `
-          <tr class="clickable" onclick="location.href='/intel/events/${encodeURIComponent(item.event_id)}'">
-            <td>${safeText(item.event_id)}</td>
-            <td>${safeText(item.target_ip)}</td>
-            <td><span class="status-badge ${severityClass(item.severity)}">${safeText(item.severity)}</span></td>
-            <td>${safeText(item.best_attack_type, '未识别')}</td>
-            <td>${fmt(item.bytes_per_sec)}</td>
+          <tr class="clickable" onclick="location.href='/intel/events/${{encodeURIComponent(item.event_id)}}'">
+            <td>${{safeText(item.event_id)}}</td>
+            <td>${{safeText(item.target_ip)}}</td>
+            <td><span class="status-badge ${{severityClass(item.severity)}}">${{safeText(item.severity)}}</span></td>
+            <td>${{safeText(item.best_attack_type, '未识别')}}</td>
+            <td>${{fmt(item.bytes_per_sec)}}</td>
           </tr>
         `).join('') : '<tr><td colspan="5" class="empty">暂无关联事件</td></tr>';
       }})
